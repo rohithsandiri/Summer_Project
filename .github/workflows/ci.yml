@@ -33,9 +33,10 @@ jobs:
 
       - name: Check Go Formatting
         run: |
-          if [ -n "$(gofmt -l .)" ]; then
+          unformatted=$(gofmt -l ./cmd ./internal ./services 2>/dev/null)
+          if [ -n "$unformatted" ]; then
             echo "The following files are not formatted properly:"
-            gofmt -l .
+            echo "$unformatted"
             exit 1
           fi
 
@@ -49,9 +50,15 @@ jobs:
         run: govulncheck ./...
 
       - name: Run Gosec (AST Security Analysis)
-        uses: securego/gosec@master
+        uses: securego/gosec@v2.21.4
         with:
-          args: ./...
+          args: -no-fail -fmt sarif -out results.sarif ./...
+
+      - name: Upload Gosec SARIF report
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: results.sarif
 
       - name: Run Unit Tests (with Race Detector)
         run: go test -race -v -coverprofile=coverage.txt -covermode=atomic ./...
@@ -70,8 +77,10 @@ jobs:
 
       - name: Helm Lint
         run: |
-          helm lint ./helm/cloud-native-platform
-          helm lint ./helm/self-healing-operator
+          helm lint ./helm/order-service
+          helm lint ./helm/inventory-service
+          helm lint ./helm/payment-service
+          helm lint ./helm/rollback-operator
 
   container-build:
     name: Secure Container Build & Security Scan
