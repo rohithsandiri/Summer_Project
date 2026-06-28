@@ -1,0 +1,120 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: microservices-alerts
+  namespace: cloud-native-platform
+  labels:
+    release: prometheus-stack
+spec:
+  groups:
+    - name: platform-health-alerts
+      rules:
+        # 1. Service Down
+        - alert: ServiceDown
+          expr: up{namespace="cloud-native-platform"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Service target down: {{ $labels.instance }}"
+            description: "Prometheus target {{ $labels.instance }} in namespace {{ $labels.namespace }} has been unreachable for more than 1 minute."
+
+        # 2. High Error Rate (5xx response rate > 5%)
+        - alert: HighErrorRate
+          expr: sum(rate(http_requests_total{status=~"5.."}[2m])) by (service) / sum(rate(http_requests_total[2m])) by (service) * 100 > 5
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High HTTP 5xx error rate on {{ $labels.service }}"
+            description: "The 5xx HTTP response rate on service {{ $labels.service }} is {{ $value | printf \"%.2f\" }}% over the last 2 minutes."
+
+        # 3. High Latency (P95 response latency > 2s)
+        - alert: HighLatency
+          expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, service)) > 2
+          for: 3m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High response latency (p95) on {{ $labels.service }}"
+            description: "The 95th percentile response latency for service {{ $labels.service }} is {{ $value | printf \"%.2f\" }}s over the last 5 minutes."
+
+        # 4. Pod CrashLoop
+        - alert: PodCrashLoop
+          expr: rate(kube_pod_container_status_restarts_total{namespace="cloud-native-platform"}[10m]) * 600 > 3
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Pod {{ $labels.pod }} crashing repeatedly"
+            description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has restarted more than 3 times in the last 10 minutes."
+
+        # 5. OutOfMemory (OOM Killed / Near Limit)
+        - alert: OutOfMemory
+          expr: container_memory_working_set_bytes{container!="",namespace="cloud-native-platform"} / container_spec_memory_limit_bytes{container!="",namespace="cloud-native-platform"} * 100 > 90
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Container {{ $labels.container }} near memory limit"
+            description: "Container {{ $labels.container }} in pod {{ $labels.pod }} is using {{ $value | printf \"%.2f\" }}% of its memory limit."
+
+        # 6. High CPU (Usage > 85%)
+        - alert: HighCPU
+          expr: sum(rate(container_cpu_usage_seconds_total{container!="",namespace="cloud-native-platform"}[5m])) by (pod, container) / sum(container_spec_cpu_quota{container!="",namespace="cloud-native-platform"} / container_spec_cpu_period{container!="",namespace="cloud-native-platform"}) by (pod, container) * 100 > 85
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Container {{ $labels.container }} CPU usage high"
+            description: "Container {{ $labels.container }} in pod {{ $labels.pod }} CPU usage is {{ $value | printf \"%.2f\" }}% over the last 5 minutes."
+
+        # 7. Inventory Failures (>10% reserve failure rate)
+        - alert: InventoryFailures
+          expr: sum(rate(inventory_reservations_failed_total[5m])) / sum(rate(inventory_reservations_total[5m])) * 100 > 10
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High inventory reservation failure rate"
+            description: "Inventory reservation failures are at {{ $value | printf \"%.2f\" }}% over the last 5 minutes."
+
+        # 8. Payment Failures (>15% payment decline rate)
+        - alert: PaymentFailures
+          expr: sum(rate(payment_failed_total[5m])) / (sum(rate(payment_success_total[5m])) + sum(rate(payment_failed_total[5m]))) * 100 > 15
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High payment transaction decline rate"
+            description: "Payment transaction decline rate is {{ $value | printf \"%.2f\" }}% over the last 2 minutes."
+
+        # 9. High Retry Rate (>20% retry rate)
+        - alert: HighRetryRate
+          expr: sum(rate(http_client_retries_total[5m])) / sum(rate(http_client_requests_total[5m])) * 100 > 20
+          for: 3m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High HTTP client retry rate"
+            description: "HTTP client retry rate is {{ $value | printf \"%.2f\" }}% over the last 5 minutes."
+
+        # 10. Slow Requests (Any request taking >3s)
+        - alert: SlowRequests
+          expr: sum(rate(http_request_duration_seconds_bucket{le="+Inf"}[5m])) - sum(rate(http_request_duration_seconds_bucket{le="3.0"}[5m])) > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Slow HTTP requests detected"
+            description: "Requests taking longer than 3 seconds have been detected on service {{ $labels.service }}."
+
+        # 11. Low Availability (SLO falls below 99.9%)
+        - alert: LowAvailability
+          expr: sum(rate(http_requests_total{status!~"5.."}[5m])) / sum(rate(http_requests_total[5m])) * 100 < 99.9
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Service Availability SLO breach"
+            description: "Overall availability has dropped to {{ $value | printf \"%.3f\" }}% over the last 5 minutes, breaching the 99.9% SLO."

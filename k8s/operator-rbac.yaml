@@ -1,0 +1,70 @@
+# k8s/operator-rbac.yaml
+#
+# The rollback operator needs permissions to:
+# 1. Read Deployments (to verify rollback succeeded)
+# 2. Create Events (to log rollback actions in K8s event stream)
+# 3. Read Secrets (Helm stores release history as Secrets — needed by helm CLI)
+# 4. List/Watch Pods (to check pod health after rollback)
+#
+# Apply with: kubectl apply -f k8s/operator-rbac.yaml
+
+# ── ServiceAccount: identity for the operator pod ─────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rollback-operator-sa
+  namespace: default
+  labels:
+    app: rollback-operator
+
+---
+# ── ClusterRole: what the operator is allowed to do ──────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rollback-operator-role
+rules:
+# Read deployment status (to verify rollback worked)
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "watch"]
+
+# Read pod status
+- apiGroups: [""]
+  resources: ["pods", "pods/log"]
+  verbs: ["get", "list", "watch"]
+
+# Read/Write Helm release secrets (helm CLI and SDK need this to perform rollback)
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# Create Kubernetes events (operator logs rollback events in K8s)
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+
+# Manage Argo Rollouts resources
+- apiGroups: ["argoproj.io"]
+  resources: ["rollouts", "rollouts/status"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+
+# Leader election leases
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+# ── ClusterRoleBinding: attach the role to the service account ────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rollback-operator-binding
+subjects:
+- kind: ServiceAccount
+  name: rollback-operator-sa
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: rollback-operator-role
+  apiGroup: rbac.authorization.k8s.io

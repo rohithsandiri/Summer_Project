@@ -1,0 +1,203 @@
+# k8s/prometheus-rules/slo-alerting-rules.yaml
+#
+# These rules evaluate SLO thresholds every 30s.
+# When a threshold is breached for the `for:` duration, an alert fires to Alertmanager.
+#
+# KEY: Each alert MUST have these labels for the operator to work:
+#   helm_release: <the helm release name to roll back>
+#   namespace:    <the Kubernetes namespace>
+#
+# Apply with: kubectl apply -f k8s/prometheus-rules/slo-alerting-rules.yaml
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: microservices-slo-rules
+  namespace: monitoring
+  labels:
+    # MUST match kube-prometheus-stack's ruleSelector
+    release: monitoring
+    role: alert-rules
+spec:
+  groups:
+
+  # ═══════════════════════════════════════════════════════════════
+  # GROUP 1: ORDER SERVICE SLOs
+  # ═══════════════════════════════════════════════════════════════
+  - name: order-service.slo
+    interval: 30s
+    rules:
+
+    # ── SLO 1: Error Rate ──────────────────────────────────────
+    - alert: OrderServiceHighErrorRate
+      expr: |
+        (
+          rate(http_requests_total{job="order-service", status_code="500"}[2m])
+          /
+          rate(http_requests_total{job="order-service"}[2m])
+        ) > 0.05
+      for: 1m
+      labels:
+        severity: critical
+        helm_release: order-service          # ← operator reads this
+        namespace: default                   # ← operator reads this
+        slo_type: error_rate
+      annotations:
+        summary: "Order service error rate breached 5% SLO"
+        description: "Error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
+        runbook: "Auto-rollback triggered for order-service"
+
+    # ── SLO 2: P99 Latency ────────────────────────────────────
+    - alert: OrderServiceHighLatency
+      expr: |
+        histogram_quantile(0.99,
+          rate(http_request_duration_seconds_bucket{job="order-service"}[5m])
+        ) > 0.5
+      for: 2m
+      labels:
+        severity: critical
+        helm_release: order-service
+        namespace: default
+        slo_type: latency
+      annotations:
+        summary: "Order service P99 latency breached 500ms SLO"
+        description: "P99 latency is {{ $value | humanizeDuration }} (threshold: 500ms)"
+
+    # ── SLO 3: Zero Available Replicas ────────────────────────
+    - alert: OrderServiceNoHealthyPods
+      expr: |
+        kube_deployment_status_replicas_available{
+          namespace="default",
+          deployment="order-service"
+        } == 0
+      for: 30s
+      labels:
+        severity: critical
+        helm_release: order-service
+        namespace: default
+        slo_type: availability
+      annotations:
+        summary: "Order service has zero healthy pods"
+        description: "All order-service pods are unavailable — complete outage"
+
+    # ── SLO 4: Traffic Drop (deployment stuck or all pods CrashLooping) ──
+    - alert: OrderServiceTrafficDrop
+      expr: |
+        rate(http_requests_total{job="order-service"}[5m]) < 0.1
+        AND
+        kube_deployment_spec_replicas{namespace="default", deployment="order-service"} > 0
+      for: 2m
+      labels:
+        severity: warning
+        helm_release: order-service
+        namespace: default
+        slo_type: throughput
+      annotations:
+        summary: "Order service traffic dropped to near-zero"
+        description: "Expected traffic but receiving < 0.1 req/s"
+
+  # ═══════════════════════════════════════════════════════════════
+  # GROUP 2: INVENTORY SERVICE SLOs
+  # ═══════════════════════════════════════════════════════════════
+  - name: inventory-service.slo
+    interval: 30s
+    rules:
+
+    - alert: InventoryServiceHighErrorRate
+      expr: |
+        (
+          rate(http_requests_total{job="inventory-service", status_code="500"}[2m])
+          /
+          rate(http_requests_total{job="inventory-service"}[2m])
+        ) > 0.05
+      for: 1m
+      labels:
+        severity: critical
+        helm_release: inventory-service
+        namespace: default
+        slo_type: error_rate
+      annotations:
+        summary: "Inventory service error rate breached 5% SLO"
+        description: "Error rate is {{ $value | humanizePercentage }}"
+
+    - alert: InventoryServiceHighLatency
+      expr: |
+        histogram_quantile(0.99,
+          rate(http_request_duration_seconds_bucket{job="inventory-service"}[5m])
+        ) > 0.5
+      for: 2m
+      labels:
+        severity: critical
+        helm_release: inventory-service
+        namespace: default
+        slo_type: latency
+      annotations:
+        summary: "Inventory service P99 latency breached 500ms SLO"
+
+    - alert: InventoryServiceNoHealthyPods
+      expr: |
+        kube_deployment_status_replicas_available{
+          namespace="default",
+          deployment="inventory-service"
+        } == 0
+      for: 30s
+      labels:
+        severity: critical
+        helm_release: inventory-service
+        namespace: default
+        slo_type: availability
+      annotations:
+        summary: "Inventory service has zero healthy pods"
+
+  # ═══════════════════════════════════════════════════════════════
+  # GROUP 3: PAYMENT SERVICE SLOs
+  # ═══════════════════════════════════════════════════════════════
+  - name: payment-service.slo
+    interval: 30s
+    rules:
+
+    - alert: PaymentServiceHighErrorRate
+      expr: |
+        (
+          rate(http_requests_total{job="payment-service", status_code="500"}[2m])
+          /
+          rate(http_requests_total{job="payment-service"}[2m])
+        ) > 0.01
+      for: 1m
+      labels:
+        severity: critical
+        helm_release: payment-service
+        namespace: default
+        slo_type: error_rate
+      annotations:
+        summary: "Payment service error rate breached 1% SLO (stricter: payment critical)"
+        description: "Error rate is {{ $value | humanizePercentage }} (threshold: 1%)"
+
+    - alert: PaymentServiceHighLatency
+      expr: |
+        histogram_quantile(0.99,
+          rate(http_request_duration_seconds_bucket{job="payment-service"}[5m])
+        ) > 0.2
+      for: 2m
+      labels:
+        severity: critical
+        helm_release: payment-service
+        namespace: default
+        slo_type: latency
+      annotations:
+        summary: "Payment service P99 latency breached 200ms SLO (stricter: payment critical)"
+
+    - alert: PaymentServiceNoHealthyPods
+      expr: |
+        kube_deployment_status_replicas_available{
+          namespace="default",
+          deployment="payment-service"
+        } == 0
+      for: 30s
+      labels:
+        severity: critical
+        helm_release: payment-service
+        namespace: default
+        slo_type: availability
+      annotations:
+        summary: "Payment service has zero healthy pods"

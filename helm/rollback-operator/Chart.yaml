@@ -1,0 +1,6 @@
+apiVersion: v2
+name: rollback-operator
+description: Self-healing Kubernetes operator that listens for Alertmanager webhooks and triggers Helm rollbacks
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

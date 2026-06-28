@@ -1,0 +1,26 @@
+# helm/rollback-operator/values.yaml
+image:
+  repository: rohithsandiri/rollback-operator
+  tag: "v1"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  port: 8090
+
+serviceAccount:
+  name: rollback-operator-sa   # Must match the name in operator-rbac.yaml
+
+resources:
+  requests:
+    cpu: "50m"
+    memory: "64Mi"
+  limits:
+    cpu: "200m"
+    memory: "128Mi"
+
+serviceMonitor:
+  enabled: true
+  interval: 15s

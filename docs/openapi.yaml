@@ -1,0 +1,195 @@
+openapi: 3.0.0
+info:
+  title: Self-Healing Kubernetes Platform API
+  description: Complete REST API specification for the API Gateway and Operator control plane.
+  version: 1.0.0
+servers:
+  - url: http://localhost:8000
+    description: API Gateway Endpoint
+  - url: http://localhost:8090
+    description: Rollback Operator Endpoint
+paths:
+  # ── API Gateway Routes ──────────────────────────────────────────────────────
+  /api/orders:
+    post:
+      summary: Create a new order
+      description: Initiates Saga pattern across inventory and payment services.
+      parameters:
+        - name: X-Trace-ID
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - user_id
+                - item
+                - amount
+              properties:
+                user_id:
+                  type: string
+                  example: "user-123"
+                item:
+                  type: string
+                  example: "item-456"
+                amount:
+                  type: number
+                  example: 99.99
+      responses:
+        '201':
+          description: Order created successfully
+        '400':
+          description: Invalid request payload
+        '500':
+          description: Saga transaction execution failure / timeout
+
+  /api/orders/{id}:
+    get:
+      summary: Retrieve order by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Order details
+        '404':
+          description: Order not found
+
+  /api/inventory/reserve:
+    post:
+      summary: Reserve inventory stock
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - item
+                - quantity
+              properties:
+                item:
+                  type: string
+                quantity:
+                  type: integer
+      responses:
+        '200':
+          description: Stock reserved successfully
+
+  /api/payments/process:
+    post:
+      summary: Process customer wallet charge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - order_id
+                - amount
+              properties:
+                order_id:
+                  type: string
+                amount:
+                  type: number
+      responses:
+        '200':
+          description: Payment charged successfully
+
+  # ── Operator Webhook & Reliability Control Plane Routes ──────────────────────
+  /webhook:
+    post:
+      summary: Ingest Prometheus Alertmanager Webhook
+      description: Receives firing or resolved alerts and delegates to Incident Manager.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - status
+                - alerts
+              properties:
+                status:
+                  type: string
+                  example: "firing"
+                alerts:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - labels
+                      - startsAt
+                    properties:
+                      labels:
+                        type: object
+                        properties:
+                          alertname:
+                            type: string
+                          service:
+                            type: string
+                          severity:
+                            type: string
+                      startsAt:
+                        type: string
+      responses:
+        '200':
+          description: Alert ingested and processed successfully
+
+  /api/reliability/incidents:
+    get:
+      summary: Retrieve list of active and historical incidents
+      responses:
+        '200':
+          description: List of incidents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    service:
+                      type: string
+                    status:
+                      type: string
+
+  /api/reliability/timeline:
+    get:
+      summary: Retrieve the chronological incident timeline
+      responses:
+        '200':
+          description: Chronological list of recovery and failure events
+
+  /api/reliability/score:
+    get:
+      summary: Calculate the SRE Reliability Score
+      responses:
+        '200':
+          description: Numerical score based on MTTR, SLO breaches, and rollback counts
+
+  /health/live:
+    get:
+      summary: Liveness Probe
+      responses:
+        '200':
+          description: Service is alive
+
+  /health/ready:
+    get:
+      summary: Readiness Probe
+      responses:
+        '200':
+          description: Service is ready to serve traffic

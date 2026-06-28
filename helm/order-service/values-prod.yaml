@@ -1,0 +1,32 @@
+# helm/order-service/values-prod.yaml
+# Production environment values for Order Service
+
+image:
+  repository: rohithsandiri/order-service
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 3
+
+errorRate: "0.0"
+latencyMs: "0"
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "250m"
+    memory: "256Mi"
+
+service:
+  type: ClusterIP
+  port: 8080
+  metricsPort: 8080
+
+serviceMonitor:
+  enabled: true
+  interval: 10s
+
+helmRelease: order-service
+namespace: production

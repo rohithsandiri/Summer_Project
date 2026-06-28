@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: self-healing-operator
+  namespace: cloud-native-platform
+  labels:
+    app: self-healing-operator
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8090
+      targetPort: 8090
+      protocol: TCP
+      name: http
+  selector:
+    app: self-healing-operator

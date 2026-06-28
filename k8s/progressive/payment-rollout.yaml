@@ -1,0 +1,55 @@
+# k8s/progressive/payment-rollout.yaml
+#
+# Argo Rollout definition for Payment Service with automated Canary strategy
+# controlled by our Self-Healing & Progressive Delivery Operator.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: payment-service
+  namespace: default
+spec:
+  replicas: 3
+  strategy:
+    canary:
+      # Stable and Canary Services are required for routing traffic split
+      stableService: payment-service-stable
+      canaryService: payment-service-canary
+      trafficRouting:
+        mock: true # Local development fallback
+      steps:
+      - setWeight: 10
+      - pause: { duration: 5m } # Operator evaluates SLO / Risk / Budget during this pause
+      - setWeight: 50
+      - pause: { duration: 10m } # Operator verifies pods & budget
+      - setWeight: 100
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: payment-service
+  template:
+    metadata:
+      labels:
+        app: payment-service
+    spec:
+      containers:
+      - name: payment-service
+        image: payment-service:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8083
+        envFrom:
+        - configMapRef:
+            name: payment-config
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8083
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8083
+          initialDelaySeconds: 10
+          periodSeconds: 10

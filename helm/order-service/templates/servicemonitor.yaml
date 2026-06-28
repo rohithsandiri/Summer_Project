@@ -1,0 +1,29 @@
+# helm/order-service/templates/servicemonitor.yaml
+# ServiceMonitor is a CRD installed by kube-prometheus-stack.
+# It tells the in-cluster Prometheus to scrape this service's /metrics endpoint.
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}
+    # This label MUST match the Prometheus Operator's serviceMonitorSelector
+    # kube-prometheus-stack uses: release=monitoring (the helm release name)
+    release: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  endpoints:
+  - port: http
+    path: {{ .Values.serviceMonitor.path }}
+    interval: {{ .Values.serviceMonitor.interval }}
+    # Add job label so PromQL can filter by service name
+    relabelings:
+    - targetLabel: job
+      replacement: {{ .Release.Name }}
+    - targetLabel: service
+      replacement: {{ .Release.Name }}
+{{- end }}

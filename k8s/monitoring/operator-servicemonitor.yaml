@@ -1,0 +1,15 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: self-healing-operator-servicemonitor
+  namespace: cloud-native-platform
+  labels:
+    release: prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: self-healing-operator
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

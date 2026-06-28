@@ -1,0 +1,91 @@
+# helm/rollback-operator/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rollback-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rollback-operator
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: rollback-operator
+  template:
+    metadata:
+      labels:
+        app: rollback-operator
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+      - name: rollback-operator
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: 8090
+        env:
+        # Tell helm CLI which namespace to look in
+        - name: HELM_NAMESPACE
+          value: {{ .Release.Namespace | quote }}
+        # Use in-cluster K8s config (the ServiceAccount token handles auth)
+        - name: KUBERNETES_SERVICE_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8090
+          initialDelaySeconds: 5
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8090
+          initialDelaySeconds: 3
+          periodSeconds: 10
+
+---
+# Service for Alertmanager to POST to
+apiVersion: v1
+kind: Service
+metadata:
+  name: rollback-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rollback-operator
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app: rollback-operator
+  ports:
+  - name: http
+    port: {{ .Values.service.port }}
+    targetPort: http
+
+---
+{{- if .Values.serviceMonitor.enabled }}
+# ServiceMonitor so Prometheus scrapes the operator's own metrics (MTTR, rollback counts)
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: rollback-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rollback-operator
+    release: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: rollback-operator
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: {{ .Values.serviceMonitor.interval }}
+    relabelings:
+    - targetLabel: job
+      replacement: rollback-operator
+{{- end }}

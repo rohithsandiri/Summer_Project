@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-service-config
+  namespace: cloud-native-platform
+data:
+  PORT: "8080"
+  LOG_LEVEL: "info"
+  READ_TIMEOUT: "30s"
+  WRITE_TIMEOUT: "30s"
+  INVENTORY_SERVICE_URL: "http://inventory-service:8081"
+  PAYMENT_SERVICE_URL: "http://payment-service:8082"
+  REDIS_URL: "redis:6379"
+  REDIS_PASSWORD: ""
+  OTEL_EXPORTER_OTLP_ENDPOINT: "tempo:4318"

@@ -1,0 +1,31 @@
+# helm/order-service/values-dev.yaml
+# Development environment values for Order Service
+
+image:
+  repository: rohithsandiri/order-service
+  tag: "dev"
+  pullPolicy: Always
+
+replicaCount: 1
+
+errorRate: "0.0"
+latencyMs: "0"
+
+resources:
+  requests:
+    cpu: "10m"
+    memory: "32Mi"
+  limits:
+    cpu: "50m"
+    memory: "64Mi"
+
+service:
+  type: ClusterIP
+  port: 8080
+  metricsPort: 8080
+
+serviceMonitor:
+  enabled: false
+
+helmRelease: order-service
+namespace: development

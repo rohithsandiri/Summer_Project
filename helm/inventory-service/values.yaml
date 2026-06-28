@@ -1,0 +1,59 @@
+# helm/order-service/values.yaml
+# These are the DEFAULT values (v1 — healthy).
+# To inject failures: helm upgrade order-service ./helm/order-service --set errorRate=0.5
+# To restore:         helm rollback order-service 0
+
+# ── Image ──────────────────────────────────────────────────────────────────
+image:
+  repository: rohithsandiri/inventory-service
+  tag: "v1"                 # Change to v2 to simulate a bad deploy
+  pullPolicy: IfNotPresent
+
+# ── Scaling ────────────────────────────────────────────────────────────────
+replicaCount: 2
+
+# ── Failure injection (read by the Go app as env vars) ──────────────────────
+errorRate: "0.0"            # 0.0–1.0 → fraction of requests that return 500
+latencyMs: "0"              # Milliseconds of artificial delay per request
+                            # Set to "2000" to simulate 2s latency spike
+
+# ── Resource limits ────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: "50m"
+    memory: "64Mi"
+  limits:
+    cpu: "200m"
+    memory: "128Mi"
+
+# ── Service ────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 8080
+  metricsPort: 8080         # Prometheus scrapes /metrics on this port
+
+# ── ServiceMonitor (tells Prometheus how to scrape this service) ──────────
+serviceMonitor:
+  enabled: true
+  interval: 15s
+  path: /metrics
+
+# ── Health probes ──────────────────────────────────────────────────────────
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 3
+  periodSeconds: 5
+  failureThreshold: 3
+
+# ── Metadata passed to PrometheusRule labels (used by operator for rollback) ──
+helmRelease: inventory-service
+namespace: default

@@ -1,0 +1,49 @@
+# k8s/alertmanager/alertmanager-config.yaml
+#
+# Configures Alertmanager to route critical SLO alerts to the rollback operator.
+# Apply with: kubectl apply -f k8s/alertmanager/alertmanager-config.yaml
+#
+# How it works:
+#   Prometheus fires alert → Alertmanager routes by "severity=critical" →
+#   HTTP POST to rollback-operator:8080/webhook → operator calls helm rollback
+
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: rollback-routing
+  namespace: monitoring
+  labels:
+    release: monitoring
+spec:
+  route:
+    # Default receiver for all alerts not matched by sub-routes
+    receiver: "null"
+    groupBy: ["helm_release", "namespace", "slo_type"]
+    groupWait: 30s          # Wait 30s after first alert before sending (batch related alerts)
+    groupInterval: 5m       # Wait 5m before re-notifying about the same group
+    repeatInterval: 1h      # Re-send firing alert every 1h if not resolved
+
+    routes:
+    # Route all critical alerts to the rollback operator
+    - matchers:
+      - name: severity
+        value: critical
+      receiver: rollback-operator
+      groupWait: 10s          # Faster for critical — don't wait 30s
+      repeatInterval: 30m
+
+  receivers:
+  # ── Null receiver: discard non-critical alerts (or send to Slack later) ──
+  - name: "null"
+
+  # ── Rollback operator webhook ──────────────────────────────────────────
+  - name: rollback-operator
+    webhookConfigs:
+    - url: "http://rollback-operator.default.svc.cluster.local:8080/webhook"
+      sendResolved: true      # Also notify when alert resolves (for MTTR calculation)
+      httpConfig:
+        tlsConfig:
+          insecureSkipVerify: true
+      # Maximum time to wait for the webhook to respond
+      # The operator responds immediately (200 OK) and processes async
+      timeout: 10s

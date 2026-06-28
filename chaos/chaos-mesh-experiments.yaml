@@ -1,0 +1,100 @@
+# chaos/chaos-mesh-experiments.yaml
+#
+# Chaos Mesh experiments to validate the self-healing and resilience of the platform.
+# Encompasses: Pod Failure, Network Latency, and Network Loss.
+
+# 1. Pod Failure: Randomly terminates a Payment Service pod to test replica recovery.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: payment-service-pod-failure
+  namespace: cloud-native-platform
+spec:
+  action: pod-failure
+  mode: one
+  duration: '30s'
+  selector:
+    namespaces:
+      - cloud-native-platform
+    labelSelectors:
+      app: payment-service
+  scheduler:
+    cron: '*/5 * * * *'
+---
+# 2. Network Latency: Injects a 3-second network delay between Order Service and Payment Service.
+#    Aims to verify that the Order -> Payment Circuit Breaker trips immediately.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: order-to-payment-latency
+  namespace: cloud-native-platform
+spec:
+  action: delay
+  mode: all
+  selector:
+    namespaces:
+      - cloud-native-platform
+    labelSelectors:
+      app: order-service
+  direction: to
+  target:
+    selector:
+      namespaces:
+        - cloud-native-platform
+      labelSelectors:
+        app: payment-service
+    mode: all
+  delay:
+    latency: '3000ms'
+    jitter: '50ms'
+  duration: '1m'
+  scheduler:
+    cron: '*/10 * * * *'
+---
+# 3. Network Packet Loss: Simulates a 20% packet loss between Gateway and Order Service.
+#    Aims to verify that retry mechanism with exponential backoff on Gateway handles transient network drops.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: gateway-to-order-packet-loss
+  namespace: cloud-native-platform
+spec:
+  action: loss
+  mode: all
+  selector:
+    namespaces:
+      - cloud-native-platform
+    labelSelectors:
+      app: api-gateway
+  direction: to
+  target:
+    selector:
+      namespaces:
+        - cloud-native-platform
+      labelSelectors:
+        app: order-service
+    mode: all
+  loss:
+    loss: '20'
+    correlation: '50'
+  duration: '1m'
+  scheduler:
+    cron: '*/15 * * * *'
+---
+# 4. Redis Cache Outage (Pod Kill): Simulates redis going down to test database read fallback.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: redis-outage
+  namespace: cloud-native-platform
+spec:
+  action: pod-kill
+  mode: all
+  duration: '30s'
+  selector:
+    namespaces:
+      - cloud-native-platform
+    labelSelectors:
+      app: redis
+  scheduler:
+    cron: '*/8 * * * *'

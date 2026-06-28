@@ -1,0 +1,32 @@
+# helm/order-service/values-staging.yaml
+# Staging environment values for Order Service
+
+image:
+  repository: rohithsandiri/order-service
+  tag: "rc-latest"
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+errorRate: "0.0"
+latencyMs: "0"
+
+resources:
+  requests:
+    cpu: "50m"
+    memory: "64Mi"
+  limits:
+    cpu: "100m"
+    memory: "128Mi"
+
+service:
+  type: ClusterIP
+  port: 8080
+  metricsPort: 8080
+
+serviceMonitor:
+  enabled: true
+  interval: 15s
+
+helmRelease: order-service
+namespace: staging
