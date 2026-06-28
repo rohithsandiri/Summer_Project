@@ -1,243 +1,191 @@
-# P11 — Self-Healing Kubernetes Cluster
-## Automated Rollback via Prometheus Alerting Rules
-### IIIT Bangalore M.Tech Project
+# Self-Healing Kubernetes Platform: Automated SRE Control Plane
+
+[![Go Version](https://img.shields.io/github/go-mod/go-version/rohithsandiri/Summer_Project)](https://golang.org)
+[![Kubernetes](https://img.shields.io/badge/kubernetes-v1.28%2B-blue)](https://kubernetes.io)
+[![Helm](https://img.shields.io/badge/helm-v3-orange)](https://helm.sh)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
+An enterprise-grade, cloud-native self-healing platform for automated recovery and progressive delivery validation. This project implements an active **SRE Control and Execution Plane** that transforms Prometheus alerts into structured recovery plans and executes programmatic Helm SDK rollbacks.
 
 ---
 
-## What Was Already Done (Your Starting Point)
-- Single Go app (`mini_monitoring`) exposing Prometheus metrics on port 8080
-- Standalone `prometheus.yml` scraping it via Docker (`host.docker.internal`)
-- No Kubernetes, no Helm chart, no Alertmanager, no operator
-
-## What This Repository Now Contains
-
-```
-Summer_Project/
-├── cmd/
-│   ├── order-service/main.go       ← Microservice 1: order management
-│   ├── inventory-service/main.go   ← Microservice 2: inventory lookup
-│   ├── payment-service/main.go     ← Microservice 3: payment processing
-│   └── operator/main.go            ← Rollback operator (the core of the project)
-├── internal/
-│   └── server/server.go            ← Shared HTTP + metrics logic (used by all 3 services)
-├── helm/
-│   ├── order-service/              ← Helm chart for order-service
-│   ├── inventory-service/          ← Helm chart for inventory-service
-│   ├── payment-service/            ← Helm chart for payment-service
-│   └── rollback-operator/          ← Helm chart for the operator itself
-├── k8s/
-│   ├── prometheus-rules/
-│   │   └── slo-alerting-rules.yaml ← SLO thresholds (error rate, latency, availability)
-│   ├── alertmanager/
-│   │   └── alertmanager-config.yaml← Routes critical alerts to operator webhook
-│   └── operator-rbac.yaml          ← RBAC permissions for the operator
-├── services/
-│   ├── order-service/Dockerfile
-│   ├── inventory-service/Dockerfile
-│   └── payment-service/Dockerfile
-├── operator/
-│   └── Dockerfile                  ← Includes helm binary (needed for helm rollback)
-└── scripts/
-    ├── 01-setup-cluster.sh         ← Start minikube + install kube-prometheus-stack
-    ├── 02-build-and-deploy.sh      ← Build images + deploy all services
-    ├── 03-generate-traffic.sh      ← Continuous traffic generator
-    └── 04-inject-failure-and-measure-mttr.sh  ← Research experiment runner
-```
+## 📖 Table of Contents
+1. [System Architecture](#-system-architecture)
+2. [SRE Engines & Workflow](#-sre-engines--workflow)
+3. [Technology Stack](#-technology-stack)
+4. [Quick Start Guide](#-quick-start-guide)
+5. [Local Development](#-local-development)
+6. [Multi-Environment Configuration](#-multi-environment-configuration)
+7. [Observability & Dashboarding](#-observability--dashboarding)
+8. [Automated Rollback & Verification](#-automated-rollback--verification)
+9. [progressive-delivery](#-progressive-delivery--deployment-guard)
+10. [Academic Thesis & Assets](#-academic-thesis--assets)
+11. [License](#-license)
 
 ---
 
-## Step-by-Step: How to Run Everything
+## 🏗 System Architecture
 
-### Prerequisites (install these first)
-```bash
-# 1. Docker Desktop
-# Download from: https://www.docker.com/products/docker-desktop
+The platform consists of an API Gateway acting as a single entrypoint, three core business microservices, a custom Kubernetes Operator, a dedicated PostgreSQL store for incident audit trails, and a Prometheus-based observability stack.
 
-# 2. minikube
-curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
-sudo install minikube-linux-amd64 /usr/local/bin/minikube
-
-# 3. kubectl
-curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-chmod +x kubectl && sudo mv kubectl /usr/local/bin/
-
-# 4. Helm
-curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-
-# Verify
-minikube version
-kubectl version --client
-helm version
+```
+                  +-----------------------------------+
+                  |            End User               |
+                  +-----------------------------------+
+                                    |
+                                    | HTTP Traffic
+                                    v
+                  +-----------------------------------+
+                  |            API Gateway            |
+                  +-----------------------------------+
+                   /                |                \
+    /api/orders   /  /api/inventory |  /api/payments  \
+                 v                  v                  v
+        +-----------+         +-----------+         +-----------+
+        |   Order   |-------->| Inventory |         |  Payment  |
+        |  Service  |         |  Service  |         |  Service  |
+        +-----------+         +-----------+         +-----------+
+              \                     |                     /
+               \                    |                    /
+                +-------------------+-------------------+
+                                    |
+                                    v (Scrapes /metrics)
+                  +-----------------------------------+
+                  |         Prometheus Server         |
+                  +-----------------------------------+
+                                    |
+                                    v (Triggers Alert)
+                  +-----------------------------------+
+                  |           Alertmanager            |
+                  +-----------------------------------+
+                                    |
+                                    v (Webhook Payload)
+                  +-----------------------------------+
+                  |      Rollback Operator (Leader)   |
+                  +-----------------------------------+
+                    /               |               \
+   Helm Go SDK     /    Audit Trails|    Verify Health\
+                  v                 v                  v
+            +-----------+     +-----------+      +-----------+
+            |  K8s API  |     | PostgreSQL|      |  Target   |
+            |  Server   |     |    DB     |      | Workloads |
+            +-----------+     +-----------+      +-----------+
 ```
 
-### Step 1: Start the Cluster + Install Prometheus Stack
-```bash
-chmod +x scripts/*.sh
-./scripts/01-setup-cluster.sh
-```
-This starts minikube and installs Prometheus + Alertmanager + Grafana via `kube-prometheus-stack`.
-
-### Step 2: Update go.mod module path (ONE TIME ONLY)
-```bash
-# Your current go.mod uses module "mini_monitoring" — update it to match the repo
-# Change line 1 of go.mod from:
-#   module mini_monitoring
-# To:
-#   module github.com/rohithsandiri/Summer_Project
-```
-
-### Step 3: Build Images and Deploy Everything
-```bash
-./scripts/02-build-and-deploy.sh
-```
-Builds 4 Docker images, loads them into minikube, deploys via Helm, applies alerting rules.
-
-### Step 4: Open Monitoring UIs (3 terminals)
-```bash
-# Terminal 1 — Prometheus
-kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 9090:9090
-
-# Terminal 2 — Grafana  
-kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80
-
-# Terminal 3 — Alertmanager
-kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-alertmanager 9093:9093
-```
-
-### Step 5: Start Traffic Generator
-```bash
-# Terminal 4 (keep running)
-./scripts/03-generate-traffic.sh
-```
-
-### Step 6: Run Failure Injection Experiments
-```bash
-# Terminal 5
-./scripts/04-inject-failure-and-measure-mttr.sh
-```
+For a detailed breakdown of communication channels, lifecycles, and sequence diagrams, refer to the [Architecture Documentation](docs/architecture.md).
 
 ---
 
-## How Failure Injection Works
+## ⚙ SRE Engines & Workflow
 
-Each service reads `ERROR_RATE` and `LATENCY_MS` from environment variables.
-You inject failures via `helm upgrade`:
-
-```bash
-# Inject 50% error rate into order-service (simulate bad deploy)
-helm upgrade order-service ./helm/order-service \
-    --set errorRate=0.5
-
-# After ~60s: Prometheus detects SLO breach
-# Alert fires → Alertmanager → webhook → operator → helm rollback
-# order-service restores to previous revision automatically
-
-# Inject 3s latency into inventory-service
-helm upgrade inventory-service ./helm/inventory-service \
-    --set latencyMs=3000
-
-# Inject 80% errors into payment-service
-helm upgrade payment-service ./helm/payment-service \
-    --set errorRate=0.8
-```
+The Rollback Operator operates as an asynchronous, state-driven control loop:
+1. **SLO Evaluator**: Checks real-time availability and response latencies against targets.
+2. **Burn Rate & Error Budget Manager**: Measures the speed at which errors consume the budget.
+3. **Dependency Graph & Root Cause Analyzer (RCA)**: Pinpoints the culprit service in a cascading outage.
+4. **Policy & Decision Engine**: Evaluates safety cooldown rules and issues recovery plans with a confidence rating.
+5. **Helm Rollback Executor**: Connects to the **Helm Go SDK** to perform version rollbacks programmatically.
+6. **Health Verifier**: Continuously checks pod readiness and service status before finishing the recovery.
 
 ---
 
-## Key PromQL Queries (test in Prometheus UI at localhost:9090)
+## 🛠 Technology Stack
 
-```promql
-# Error rate for order-service (should be < 5% for SLO)
-rate(http_requests_total{job="order-service", status_code="500"}[2m])
-/ rate(http_requests_total{job="order-service"}[2m])
-
-# P99 latency for inventory-service
-histogram_quantile(0.99,
-  rate(http_request_duration_seconds_bucket{job="inventory-service"}[5m])
-)
-
-# MTTR histogram — your research result!
-operator_mttr_seconds_bucket
-
-# Total rollbacks triggered
-operator_rollbacks_total
-
-# Active requests per service
-http_active_requests
-```
+- **Backend**: Go (Golang) 1.21
+- **API Gateway**: Custom Reverse Proxy with Rate Limiting, Circuit Breakers, and OTel propagation
+- **Database**: PostgreSQL (Persistent Store) & Redis (Cache)
+- **Containerization**: Docker & Docker Compose
+- **Orchestration**: Kubernetes (Deployments, Services, ConfigMaps, Secrets, RBAC, NetworkPolicies, PDBs)
+- **Packaging**: Helm 3
+- **Observability**: Prometheus Operator, ServiceMonitors, PrometheusRules, Alertmanager, Grafana Dashboards
+- **Distributed Tracing**: OpenTelemetry & Jaeger
+- **Progressive Delivery**: Argo Rollouts (Canary deployments)
 
 ---
 
-## SLOs Implemented
+## 🚀 Quick Start Guide
 
-| Service | Error Rate SLO | Latency SLO (P99) | Availability SLO |
-|---------|---------------|-------------------|-----------------|
-| order-service | < 5% | < 500ms | ≥ 1 pod healthy |
-| inventory-service | < 5% | < 500ms | ≥ 1 pod healthy |
-| payment-service | < 1% (stricter!) | < 200ms (stricter!) | ≥ 1 pod healthy |
+### Prerequisites
+Make sure you have installed:
+- Docker Desktop
+- minikube
+- kubectl
+- Helm 3
 
----
-
-## MTTR Measurement Protocol
-
-```
-T0 = helm upgrade runs (failure injected)
-T1 = Prometheus detects SLO breach (after `for: 1m` window)
-T2 = Alertmanager fires webhook to operator
-T3 = Operator calls helm rollback
-T4 = All pods healthy (rollback complete)
-
-MTTR = T4 - T1  (detection to recovery)
-```
-
-After running all scenarios, compare:
-- **Manual MTTR** (you observe alert → manually run helm rollback): ~15-45 minutes
-- **Automated MTTR** (operator does it): ~90-180 seconds
-- **Improvement factor**: 10-20x
+### Deployment in 3 Steps
+1. **Initialize the Cluster & Monitoring Stack**:
+   ```bash
+   ./scripts/01-setup-cluster.sh
+   ```
+2. **Build and Deploy Platform Workloads**:
+   ```bash
+   ./scripts/02-build-and-deploy.sh
+   ```
+3. **Start Load Generator**:
+   ```bash
+   ./scripts/03-generate-traffic.sh
+   ```
 
 ---
 
-## Checking Operator Logs
-```bash
-# Watch operator logs in real time
-kubectl logs -f deployment/rollback-operator -n default
+## 💻 Local Development
 
-# Expected output when an alert fires:
-# ALERT FIRING: default/order-service | alert=OrderServiceHighErrorRate
-# ROLLBACK START: release=order-service namespace=default
-# helm rollback output: Rollback was a success! Happy Helming!
-# ROLLBACK SUCCESS: default/order-service | MTTR=107.3s
+### Running with Docker Compose
+If you want to run and test the microservices locally without Kubernetes:
+```bash
+docker-compose up --build
 ```
+This starts the Postgres database, API Gateway, Order Service, Inventory Service, and Payment Service.
 
 ---
 
-## Troubleshooting
+## 🌐 Multi-Environment Configuration
 
-**ServiceMonitor not picking up services:**
-```bash
-kubectl get servicemonitor -n default
-# Should show order-service, inventory-service, payment-service
-# If missing: check that release: monitoring label is in the ServiceMonitor
-```
+Each Helm chart includes three separate values profiles:
+- **Dev**: Single replica, minimum resource limits, debug logging. See [values-dev.yaml](helm/order-service/values-dev.yaml).
+- **Staging**: Dual replicas, standard limits, enabled Prometheus ServiceMonitors. See [values-staging.yaml](helm/order-service/values-staging.yaml).
+- **Production**: Three replicas, high limits, pod anti-affinities, TopologySpreadConstraints, and securityContext locks. See [values-prod.yaml](helm/order-service/values-prod.yaml).
 
-**Alerts not firing:**
-```bash
-# Check Prometheus rules are loaded
-kubectl get prometheusrule -n monitoring
-# Check rule evaluation in Prometheus UI → Status → Rules
-```
+---
 
-**Operator not receiving webhooks:**
-```bash
-# Check Alertmanager config
-kubectl get alertmanagerconfig -n monitoring
-# Check operator is reachable from monitoring namespace
-kubectl exec -n monitoring deployment/alertmanager -c alertmanager -- \
-    wget -qO- http://rollback-operator.default.svc.cluster.local:8080/health
-```
+## 📊 Observability & Dashboarding
 
-**Helm rollback failing in operator:**
+Prometheus Operator is configured via `ServiceMonitor` resources to automatically scrape endpoints every 15s. Custom **Grafana Dashboards** are loaded at deployment:
+- **SRE Reliability Dashboard**: Displays SLO status, burn rates, remaining error budgets, and MTTR graphs.
+- **Microservices Performance**: Shows requests per second, error ratios, and p95/p99 response latency.
+
+Refer to the [Screenshots Guide](docs/screenshots.md) to view layout setups.
+
+---
+
+## 🛡 Automated Rollback & Verification
+
+To inject a failure and verify the self-healing capability:
 ```bash
-# The operator needs helm binary in its container (see operator/Dockerfile)
-# And needs the rollback-operator-sa ServiceAccount with RBAC
-kubectl get clusterrolebinding rollback-operator-binding
+# Inject 50% error rate on order-service
+helm upgrade order-service ./helm/order-service --set errorRate=0.5
 ```
+Watch the operator automatically rollback the release to the previous healthy version `N-1`. Refer to the [Demo Guide](docs/demo-guide.md) for full interactive scripts.
+
+---
+
+## 🚦 Progressive Delivery & Deployment Guard
+
+When executing a canary rollout:
+- The **Deployment Guard** evaluates safety conditions (active incidents, SLO breaches, error budget depletion).
+- If the deployment risk score calculated by the **Risk Engine** is too high, the rollout is blocked.
+- Argo Rollouts pauses and aborts the canary release to protect production traffic.
+
+---
+
+## 🎓 Academic Thesis & Assets
+
+This project is prepared for M.Tech thesis submission at IIIT Bangalore. All research, abstract, evaluation metrics, and performance charts are located under:
+- **Thesis Abstract & Problem Statement**: [Thesis Assets](docs/thesis-assets.md)
+- **Performance Benchmarks (Manual vs Automated)**: [Benchmark Report](docs/benchmarks.md)
+- **Defense Slide Deck Outline**: [Presentation Outline](docs/presentation.md)
+
+---
+
+## 📄 License
+
+This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
