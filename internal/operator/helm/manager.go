@@ -13,6 +13,7 @@ package helm
 import (
 	"fmt"
 	"os"
+	"reflect"
 
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/cli"
@@ -142,12 +143,33 @@ func (c *Client) GetLastHealthyRevision(namespace, name string) (int, error) {
 		currentRev = 0
 	}
 
+	// The current revision is the one under incident — its user-supplied
+	// values are the faulty configuration we are rolling away from.
+	var currentConfig map[string]interface{}
+	for _, rel := range history {
+		if rel.Version == currentRev {
+			currentConfig = rel.Config
+			break
+		}
+	}
+
 	// History is sorted oldest to newest. We search backward from the end.
 	for i := len(history) - 1; i >= 0; i-- {
 		rel := history[i]
 
 		// Skip the current version since we are rolling back to an older version.
 		if rel.Version == currentRev {
+			continue
+		}
+
+		// Skip revisions carrying the same user-supplied values as the current
+		// (faulty) revision. A rollback re-applies the target's manifests, so
+		// rolling back to an identical config is a no-op that reports success
+		// while leaving the fault in place — this happens naturally right
+		// after a rollback, when the newest superseded revision IS the faulty
+		// one the previous rollback escaped from, and picking it flips the
+		// release straight back into the bad configuration.
+		if currentConfig != nil && reflect.DeepEqual(rel.Config, currentConfig) {
 			continue
 		}
 

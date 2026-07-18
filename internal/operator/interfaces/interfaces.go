@@ -36,6 +36,10 @@ type PolicyEngine interface {
 type CooldownManager interface {
 	IsCoolingDown(ctx context.Context, service string, alertName string) (bool, time.Duration)
 	RecordRecovery(ctx context.Context, service string, alertName string, duration time.Duration)
+	// TryStartExecution atomically claims the per-service execution slot for
+	// the window, returning false (with remaining time) if another recovery
+	// execution for the service is still within its window.
+	TryStartExecution(ctx context.Context, service string, window time.Duration) (bool, time.Duration)
 }
 
 // StateMachine manages valid state transitions and logs progression.

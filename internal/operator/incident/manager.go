@@ -290,6 +290,23 @@ func (mgr *Manager) runRecoveryPipeline(
 
 	mgr.log.Info(ctx, "starting rollback execution pipeline", f)
 
+	// Atomic per-service execution gate. The decision-time cooldown check is
+	// advisory only: several incidents for the same service (per-pod alert
+	// instances, or an error-rate and a latency alert arriving together) can
+	// all pass it before any of them records a recovery. Executing more than
+	// one rollback flips the release between revisions — each rollback lands
+	// on the revision the previous one just escaped from — so exactly one
+	// execution per service per cooldown window is allowed through here.
+	if ok, remaining := mgr.cooldown.TryStartExecution(ctx, plan.ServiceID, plan.Cooldown); !ok {
+		mgr.log.Warn(ctx, "recovery execution suppressed: another recovery for this service ran recently", f, "remaining_window", remaining.String())
+		if mgr.timeline != nil {
+			_ = mgr.timeline.Record(ctx, incident.ID, fmt.Sprintf("Recovery execution suppressed — service %s already recovered %s ago (within cooldown window)", plan.ServiceID, remaining.String()))
+		}
+		_ = mgr.stateMachine.Transition(ctx, incident, models.StateWaiting, "Recovery suppressed: service already recovered within cooldown window")
+		_ = mgr.store.Update(ctx, incident)
+		return
+	}
+
 	maxAttempts := plan.RetryPolicy.MaxRetries
 	if maxAttempts <= 0 {
 		maxAttempts = 1
