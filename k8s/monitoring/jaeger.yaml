@@ -1,0 +1,92 @@
+# k8s/monitoring/jaeger.yaml
+#
+# Jaeger all-in-one for distributed tracing. The services export OTLP/HTTP
+# spans (internal/shared/otel) to OTEL_EXPORTER_OTLP_ENDPOINT; point that at
+# jaeger:4318 (the charts do this by default via values.yaml otlpEndpoint).
+#
+# Apply:   kubectl apply -f k8s/monitoring/jaeger.yaml
+# UI:      kubectl port-forward -n monitoring svc/jaeger 16686:16686
+#          → http://localhost:16686
+#
+# All-in-one keeps traces in memory (bounded below) — right-sized for this
+# demo cluster, not for production retention.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: monitoring
+  labels:
+    app: jaeger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      containers:
+      - name: jaeger
+        image: jaegertracing/all-in-one:1.60
+        args:
+        - "--memory.max-traces=20000"
+        env:
+        - name: COLLECTOR_OTLP_ENABLED
+          value: "true"
+        ports:
+        - containerPort: 16686   # UI
+          name: ui
+        - containerPort: 4318    # OTLP HTTP
+          name: otlp-http
+        - containerPort: 4317    # OTLP gRPC
+          name: otlp-grpc
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 300m
+            memory: 400Mi
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 16686
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: monitoring
+  labels:
+    app: jaeger
+spec:
+  selector:
+    app: jaeger
+  ports:
+  - name: ui
+    port: 16686
+    targetPort: 16686
+  - name: otlp-http
+    port: 4318
+    targetPort: 4318
+  - name: otlp-grpc
+    port: 4317
+    targetPort: 4317
+---
+# Cross-namespace alias so workloads in `default` can use the short name
+# "jaeger:4318" instead of the full jaeger.monitoring.svc.cluster.local.
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: default
+  labels:
+    app: jaeger
+spec:
+  type: ExternalName
+  externalName: jaeger.monitoring.svc.cluster.local

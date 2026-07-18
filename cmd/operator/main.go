@@ -148,7 +148,7 @@ func main() {
 	stateMachine := state.NewStateMachine(log, m, timeline)
 
 	executorInstance := executor.NewHelmRollbackExecutor(helmClient, stateMachine, m, log)
-	verifierInstance := verification.NewK8sVerificationEngine(clientset, m, log)
+	verifierInstance := verification.NewK8sVerificationEngine(clientset, m, log).WithPrometheus(promClient)
 	retryEngineInstance := retry.NewRetryEngine(m, log)
 
 	// 9. Initialize decision & planning engines
@@ -183,6 +183,16 @@ func main() {
 		timeline,
 		reliabilityEngine,
 	)
+
+	// 10a. Dependency-aware batch rollback: when a rollback succeeds, roll
+	// back tightly-coupled services co-released with the faulty revision so
+	// callers aren't stranded on API contracts the rollback removed.
+	if cfg.DependencyRollbackEnabled {
+		depGraph := dependency.NewGraph()
+		depCoordinator := dependency.NewCoordinator(depGraph, helmClient, cooldownManager, log, cfg.DependencyBatchWindow, 5*time.Minute)
+		incidentManager.SetDependencyCoordinator(depCoordinator)
+		log.Info(ctx, "dependency-aware batch rollback enabled", logger.Fields{}, "batch_window", cfg.DependencyBatchWindow.String())
+	}
 
 	// 10b. Start Leader Election if enabled
 	if cfg.LeaderElectionEnabled {

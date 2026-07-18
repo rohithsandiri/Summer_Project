@@ -8,9 +8,11 @@ package verification
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/rohithsandiri/Summer_Project/internal/operator/logger"
 	"github.com/rohithsandiri/Summer_Project/internal/operator/metrics"
+	"github.com/rohithsandiri/Summer_Project/internal/operator/prometheus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -20,11 +22,22 @@ type VerificationEngine interface {
 	Verify(ctx context.Context, service string, namespace string, traceID string) (bool, error)
 }
 
+// SLOVerifier confirms the violated SLO itself has recovered, not just that
+// pods are healthy. Pod health alone is a false signal after a rollback that
+// lands on a revision with a latent fault: pods answer their probes while the
+// service still breaches its SLO. Implemented by engines that hold a
+// Prometheus client; the incident manager type-asserts for it so existing
+// VerificationEngine implementations (and test mocks) keep working unchanged.
+type SLOVerifier interface {
+	VerifySLO(ctx context.Context, service string, alertName string, traceID string) (bool, error)
+}
+
 // K8sVerificationEngine implements VerificationEngine using Kubernetes client-go APIs.
 type K8sVerificationEngine struct {
-	clientset kubernetes.Interface
-	m         *metrics.OperatorMetrics
-	log       *logger.Logger
+	clientset  kubernetes.Interface
+	promClient prometheus.PrometheusClient
+	m          *metrics.OperatorMetrics
+	log        *logger.Logger
 }
 
 func NewK8sVerificationEngine(
@@ -37,6 +50,47 @@ func NewK8sVerificationEngine(
 		m:         m,
 		log:       log,
 	}
+}
+
+// WithPrometheus enables SLO-aware verification by attaching a Prometheus
+// client. Without it, VerifySLO trusts pod health alone (returns true).
+func (ve *K8sVerificationEngine) WithPrometheus(pc prometheus.PrometheusClient) *K8sVerificationEngine {
+	ve.promClient = pc
+	return ve
+}
+
+// VerifySLO reports whether the alert that triggered the incident has stopped
+// firing in Prometheus. The ALERTS series covers every SLO type uniformly
+// (error rate, latency, availability, stuck rollout) without re-encoding each
+// rule's expression here, and `or vector(0)` keeps the query non-empty so a
+// fully-resolved alert reads as 0.
+func (ve *K8sVerificationEngine) VerifySLO(ctx context.Context, service string, alertName string, traceID string) (bool, error) {
+	if ve.promClient == nil || alertName == "" {
+		return true, nil
+	}
+
+	f := logger.Fields{
+		TraceID:   traceID,
+		Service:   service,
+		AlertName: alertName,
+	}
+
+	query := fmt.Sprintf(`count(ALERTS{alertname=%q, alertstate="firing"}) or vector(0)`, alertName)
+	firing, err := ve.promClient.Query(ctx, query, time.Now())
+	if err != nil {
+		// Prometheus being unreachable must not wedge recovery: report the
+		// error but do not fail verification on infrastructure flakiness.
+		ve.log.Warn(ctx, "slo verification query failed, falling back to pod-health result", f, "error", err.Error())
+		return true, nil
+	}
+
+	if firing > 0 {
+		ve.log.Warn(ctx, "slo alert still firing after rollback, verification not yet passed", f, "firing_instances", firing)
+		return false, nil
+	}
+
+	ve.log.Info(ctx, "slo verification passed: triggering alert no longer firing", f)
+	return true, nil
 }
 
 func (ve *K8sVerificationEngine) Verify(ctx context.Context, service string, namespace string, traceID string) (bool, error) {

@@ -23,6 +23,11 @@ type Config struct {
 	LeaderElectionEnabled   bool
 	LeaderElectionID        string
 	LeaderElectionNamespace string
+
+	// Dependency-aware batch rollback: when a service is rolled back, roll
+	// back tightly-coupled services co-released within BatchWindow too.
+	DependencyRollbackEnabled bool
+	DependencyBatchWindow     time.Duration
 }
 
 func Load() (*Config, error) {
@@ -38,7 +43,11 @@ func Load() (*Config, error) {
 
 	promAddr := os.Getenv("PROMETHEUS_ADDR")
 	if promAddr == "" {
-		promAddr = "http://prometheus-k8s.monitoring.svc:9090"
+		// kube-prometheus-stack installed as release "monitoring" (see
+		// scripts/01-setup-cluster.sh) names its Prometheus service this way;
+		// prometheus-k8s is the plain kube-prometheus manifests' name and
+		// does not exist in this cluster.
+		promAddr = "http://monitoring-kube-prometheus-prometheus.monitoring.svc:9090"
 	}
 
 	// Initialize default policies.
@@ -75,6 +84,15 @@ func Load() (*Config, error) {
 			MaxRetries:        3,
 		},
 		{
+			ID:                "policy-order-stuck-rollout-rollback",
+			Service:           "order-service",
+			AlertName:         "OrderServiceStuckRollout",
+			RecommendedAction: models.ActionPrepareRollback,
+			CooldownDuration:  5 * time.Minute,
+			Timeout:           10 * time.Minute,
+			MaxRetries:        2,
+		},
+		{
 			ID:                "policy-order-traffic-drop-wait",
 			Service:           "order-service",
 			AlertName:         "OrderServiceTrafficDrop",
@@ -100,6 +118,15 @@ func Load() (*Config, error) {
 			RecommendedAction: models.ActionPrepareRollback,
 			CooldownDuration:  10 * time.Minute,
 			Timeout:           15 * time.Minute,
+			MaxRetries:        2,
+		},
+		{
+			ID:                "policy-inventory-stuck-rollout-rollback",
+			Service:           "inventory-service",
+			AlertName:         "InventoryServiceStuckRollout",
+			RecommendedAction: models.ActionPrepareRollback,
+			CooldownDuration:  5 * time.Minute,
+			Timeout:           10 * time.Minute,
 			MaxRetries:        2,
 		},
 		{
@@ -129,6 +156,15 @@ func Load() (*Config, error) {
 			CooldownDuration:  5 * time.Minute,
 			Timeout:           10 * time.Minute,
 			MaxRetries:        3,
+		},
+		{
+			ID:                "policy-payment-stuck-rollout-rollback",
+			Service:           "payment-service",
+			AlertName:         "PaymentServiceStuckRollout",
+			RecommendedAction: models.ActionPrepareRollback,
+			CooldownDuration:  5 * time.Minute,
+			Timeout:           10 * time.Minute,
+			MaxRetries:        2,
 		},
 		{
 			ID:                "policy-payment-no-healthy-pods-restart",
@@ -173,6 +209,16 @@ func Load() (*Config, error) {
 		},
 	}
 
+	// Enabled unless explicitly disabled — co-released contract partners
+	// being stranded on a lone rollback is the default failure mode.
+	depEnabled := os.Getenv("DEPENDENCY_ROLLBACK_ENABLED") != "false"
+	depWindow := 10 * time.Minute
+	if v := os.Getenv("DEPENDENCY_BATCH_WINDOW_MINUTES"); v != "" {
+		if mins, err := strconv.Atoi(v); err == nil && mins > 0 {
+			depWindow = time.Duration(mins) * time.Minute
+		}
+	}
+
 	leEnabled := os.Getenv("LEADER_ELECTION_ENABLED") == "true"
 	leID := os.Getenv("POD_NAME")
 	if leID == "" {
@@ -192,6 +238,9 @@ func Load() (*Config, error) {
 		LeaderElectionEnabled:   leEnabled,
 		LeaderElectionID:        leID,
 		LeaderElectionNamespace: leNamespace,
+
+		DependencyRollbackEnabled: depEnabled,
+		DependencyBatchWindow:     depWindow,
 	}
 
 	if err := cfg.Validate(); err != nil {

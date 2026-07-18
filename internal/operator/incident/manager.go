@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rohithsandiri/Summer_Project/internal/operator/dependency"
 	"github.com/rohithsandiri/Summer_Project/internal/operator/executor"
 	"github.com/rohithsandiri/Summer_Project/internal/operator/interfaces"
 	"github.com/rohithsandiri/Summer_Project/internal/operator/logger"
@@ -42,9 +43,19 @@ type Manager struct {
 	timeline    reliability.TimelineEngine
 	reliability *reliability.ReliabilityEngine
 
+	// Optional batch-aware dependency rollback (set via SetDependencyCoordinator)
+	depCoordinator *dependency.Coordinator
+
 	// Leader election fields
 	isLeader bool
 	leaderMu sync.RWMutex
+}
+
+// SetDependencyCoordinator enables dependency-aware batch rollback: after a
+// primary rollback succeeds, tightly-coupled services co-released with the
+// faulty revision are rolled back too.
+func (mgr *Manager) SetDependencyCoordinator(c *dependency.Coordinator) {
+	mgr.depCoordinator = c
 }
 
 func (mgr *Manager) SetLeader(leader bool) {
@@ -269,6 +280,21 @@ func (mgr *Manager) ProcessAlert(ctx context.Context, alert *models.Alert, trace
 	return nil
 }
 
+// verifyHealthAndSLO runs pod-health verification and, when the verifier also
+// implements SLOVerifier, additionally requires the triggering alert to have
+// stopped firing in Prometheus. Pod health alone reports success even when a
+// rollback lands on a revision that still breaches the SLO.
+func (mgr *Manager) verifyHealthAndSLO(ctx context.Context, service, namespace, alertName, traceID string) (bool, error) {
+	ok, err := mgr.verifier.Verify(ctx, service, namespace, traceID)
+	if !ok || err != nil {
+		return ok, err
+	}
+	if sv, isSLOVerifier := mgr.verifier.(verification.SLOVerifier); isSLOVerifier {
+		return sv.VerifySLO(ctx, service, alertName, traceID)
+	}
+	return true, nil
+}
+
 // runRecoveryPipeline coordinates execution and verification loop in Phase 4B.
 func (mgr *Manager) runRecoveryPipeline(
 	ctx context.Context,
@@ -371,7 +397,7 @@ func (mgr *Manager) runRecoveryPipeline(
 		verified := false
 
 		// Run first check immediately!
-		ok, vErr := mgr.verifier.Verify(ctx, plan.ServiceID, k8sNamespace, traceID)
+		ok, vErr := mgr.verifyHealthAndSLO(ctx, plan.ServiceID, k8sNamespace, incident.AlertName, traceID)
 		if vErr != nil {
 			mgr.log.Warn(ctx, "verification checks returned error", f, "error", vErr.Error())
 		}
@@ -389,7 +415,7 @@ func (mgr *Manager) runRecoveryPipeline(
 					lastErr = fmt.Errorf("verification timed out after %s", plan.Timeout.String())
 					break VerifyLoop
 				case <-verifyTicker.C:
-					ok, vErr = mgr.verifier.Verify(ctx, plan.ServiceID, k8sNamespace, traceID)
+					ok, vErr = mgr.verifyHealthAndSLO(ctx, plan.ServiceID, k8sNamespace, incident.AlertName, traceID)
 					if vErr != nil {
 						mgr.log.Warn(ctx, "verification checks returned error", f, "error", vErr.Error())
 					}
@@ -449,6 +475,23 @@ func (mgr *Manager) runRecoveryPipeline(
 			}
 
 			_ = mgr.rollbackStore.RecordRollback(ctx, historyEntry)
+
+			// Batch-aware dependency rollback: services co-released with the
+			// faulty revision share its API contracts — roll them back too so
+			// callers aren't left invoking endpoints that no longer exist.
+			if mgr.depCoordinator != nil && plan.DesiredAction == models.ActionPrepareRollback {
+				peers := mgr.depCoordinator.RollbackBatchPeers(ctx, plan.ServiceID, k8sNamespace, executionResult.OldRevision, traceID)
+				for _, p := range peers {
+					if mgr.timeline != nil {
+						if p.RolledBack {
+							_ = mgr.timeline.Record(ctx, incident.ID, fmt.Sprintf("Dependency batch rollback: co-released peer %s rolled back to revision %d (%s)", p.Service, p.TargetRev, p.Reason))
+						} else {
+							_ = mgr.timeline.Record(ctx, incident.ID, fmt.Sprintf("Dependency peer %s not rolled back: %s", p.Service, p.Reason))
+						}
+					}
+				}
+			}
+
 			_ = mgr.stateMachine.Transition(ctx, incident, models.StateRecovered, "System verified healthy")
 			_ = mgr.stateMachine.Transition(ctx, incident, models.StateHealthy, "Incident resolved and archived")
 

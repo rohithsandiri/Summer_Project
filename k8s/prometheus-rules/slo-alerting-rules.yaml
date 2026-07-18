@@ -201,3 +201,60 @@ spec:
         slo_type: availability
       annotations:
         summary: "Payment service has zero healthy pods"
+
+  # ═══════════════════════════════════════════════════════════════
+  # GROUP 4: STUCK ROLLOUTS (CrashLoopBackOff / ImagePull failures)
+  #
+  # With maxUnavailable: 0, a bad rollout strands the new ReplicaSet while
+  # old pods keep serving — no SLO breaches, so none of the alerts above
+  # ever fire, and the faulty revision sits "deployed" indefinitely.
+  # These rules detect the stuck state directly: updated replicas stay
+  # below spec when the new pods can't become ready. `for: 3m` gives a
+  # healthy rollout (which finishes in ~30s here) ample headroom.
+  # ═══════════════════════════════════════════════════════════════
+  - name: stuck-rollouts.slo
+    interval: 30s
+    rules:
+
+    - alert: OrderServiceStuckRollout
+      expr: |
+        kube_deployment_status_replicas_updated{namespace="default", deployment="order-service"}
+        <
+        kube_deployment_spec_replicas{namespace="default", deployment="order-service"}
+      for: 3m
+      labels:
+        severity: critical
+        helm_release: order-service
+        namespace: default
+        slo_type: rollout
+      annotations:
+        summary: "Order service rollout is stuck (new pods failing to become ready)"
+        description: "Updated replicas below spec for 3m — likely CrashLoopBackOff or image failure on the new revision"
+
+    - alert: InventoryServiceStuckRollout
+      expr: |
+        kube_deployment_status_replicas_updated{namespace="default", deployment="inventory-service"}
+        <
+        kube_deployment_spec_replicas{namespace="default", deployment="inventory-service"}
+      for: 3m
+      labels:
+        severity: critical
+        helm_release: inventory-service
+        namespace: default
+        slo_type: rollout
+      annotations:
+        summary: "Inventory service rollout is stuck (new pods failing to become ready)"
+
+    - alert: PaymentServiceStuckRollout
+      expr: |
+        kube_deployment_status_replicas_updated{namespace="default", deployment="payment-service"}
+        <
+        kube_deployment_spec_replicas{namespace="default", deployment="payment-service"}
+      for: 3m
+      labels:
+        severity: critical
+        helm_release: payment-service
+        namespace: default
+        slo_type: rollout
+      annotations:
+        summary: "Payment service rollout is stuck (new pods failing to become ready)"

@@ -48,13 +48,18 @@ func (p *Parser) Parse(payload *models.AlertmanagerPayload) ([]*models.Alert, er
 			return nil, fmt.Errorf("alert at index %d is missing alertname label", i)
 		}
 
-		// Try to resolve the target service name
-		service := raw.Labels["service"]
+		// Resolve the target service name. helm_release comes first: it is
+		// the label our PrometheusRules set deliberately for the operator,
+		// while `service`/`app` can be inherited from the scrape target —
+		// alerts built on kube-state-metrics series arrive with
+		// service="monitoring-kube-state-metrics", which would fail policy
+		// matching (and nearly did: see live-failure-simulation-findings.md).
+		service := raw.Labels["helm_release"]
 		if service == "" {
-			service = raw.Labels["app"]
+			service = raw.Labels["service"]
 		}
 		if service == "" {
-			service = raw.Labels["helm_release"]
+			service = raw.Labels["app"]
 		}
 		if service == "" {
 			return nil, fmt.Errorf("alert at index %d is missing service/app/helm_release label", i)

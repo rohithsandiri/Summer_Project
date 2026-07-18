@@ -158,7 +158,66 @@ When the execution gate suppresses a duplicate recovery, the incident parks in `
 
 ---
 
-## 6. Conclusions
+## 6. Part 2 — Enhancement Implementation and Live Verification
+
+A second implementation wave added the four "make it smarter" capabilities, each verified live. The live tests caught **three additional bugs** (F6–F8) that unit tests and the first suite had missed.
+
+### 6.1 CrashLoopBackOff auto-rollback (closes F4)
+
+New critical `*StuckRollout` rules detect a rollout whose updated replicas stay below spec for 3 minutes (the signature of CrashLoopBackOff/image failures contained by `maxUnavailable: 0`), mapped to rollback policies.
+
+**Live test:** `helm upgrade order-service --set errorRate=5.0` — the out-of-range value fails config validation, the service `log.Fatalf`s at startup, and the new pod enters a genuine CrashLoopBackOff while old pods keep serving (zero user impact throughout).
+
+| Time | Event |
+|---|---|
+| 16:14:57 | Injected (revision 18); new pod crash-looping within 30 s |
+| 16:18:57≈ | `OrderServiceStuckRollout` fired (3 m `for:` + evaluation) |
+| 16:19:12 | Operator matched `policy-order-stuck-rollout-rollback`, rolled back |
+| 16:19:17 | **Auto-rollback confirmed — MTTR 260 s**, both pods healthy |
+
+The dependency coordinator also ran and correctly declined both peers ("deploy_gap=2h22m … not part of deployment batch").
+
+### 6.2 New findings from the live tests (all fixed)
+
+**F6 — Alert parser preferred the scrape target's `service` label over `helm_release`.** The first stuck-rollout attempt fired and routed perfectly, but the operator logged `Service=monitoring-kube-state-metrics` — kube-state-metrics' own `service` label rode along on the alert, no policy matched, decision was Ignore. Every alert built on kube-state-metrics series (including the pre-existing `NoHealthyPods` rules) had this latent bug. Fix: `helm_release` — the label our rules set deliberately as the operator contract — now takes precedence in the parser.
+
+**F7 — Helm history arrives lexicographically sorted, so rollback targets were near-arbitrary past 10 revisions.** The SDK's history action returns releases in Kubernetes secret-name order (`…v1, v10, …, v18, v2, …, v9`), so "newest revision at the end" silently broke once a release accumulated 10+ revisions — the backward walk repeatedly picked `v9` (observed from both v13 and v18), which retroactively explains the wrong-direction cascade rollback in Part 1's re-verification. Fix: sort history numerically by revision before target selection.
+
+**F8 — SLO verification pointed at a non-existent Prometheus hostname.** The default `prometheus-k8s.monitoring.svc` is the plain kube-prometheus manifests' service name; kube-prometheus-stack names it `monitoring-kube-prometheus-prometheus`. The graceful fallback (pod-health only, with a warning) worked exactly as designed, which is why this was a log-line discovery rather than an outage. Fix: correct default plus explicit `PROMETHEUS_ADDR` in the operator chart.
+
+**Operational note (reinforces F5):** during the enhancement rollout, Alertmanager delivered a firing notification to the old operator pod as it terminated, recorded the delivery as successful, and deduplicated further notifications for the group until `repeatInterval`. Rolling the operator mid-incident can therefore eat one notification — an internal reconcile loop (F5 recommendation 1) is the durable answer; restarting Alertmanager (state is on emptyDir) is the operational workaround.
+
+### 6.3 Dependency-aware batch rollback
+
+`internal/operator/dependency/coordinator.go`: after a primary rollback succeeds, direct callers and callees of the failed service whose current revision was deployed within the batch window (default 10 min, `DEPENDENCY_BATCH_WINDOW_MINUTES`) are rolled back too — co-released services share API contracts, and rolling back only the callee strands its callers on endpoints that no longer exist. Peers claim the same per-service execution gate as alert-driven recoveries (no double rollbacks, no recursion; transitive closure deliberately excluded). Unit-tested (co-release, out-of-window, gate-claimed, initial-revision cases) and verified live in the batch test below.
+
+**Live test — the caller/callee co-release scenario:** inventory-service (benign change) and order-service (`errorRate=0.5`) deployed as one batch, 1 second apart.
+
+| Time | Event |
+|---|---|
+| 16:48:08 | Batch deployed: inventory rev 14 (benign), order rev 23 (faulty) |
+| 16:50:13 | `OrderServiceHighErrorRate` fired → order rolled back v23 → v22 (correct clean target — F7's numeric sort verified live) — **MTTR 126 s** |
+| 16:50–16:52 | SLO-aware verification held the incident in Verifying until the alert actually cleared in Prometheus: "slo verification passed: triggering alert no longer firing" at 16:52:44 |
+| 16:52:44 | Dependency coordinator: inventory deploy gap **299 ms** → co-released → rolled back rev 14 → 13; payment deploy gap 3 h 7 m → correctly left alone |
+| 16:53:19 | Final state: both services on clean configs (`errorRate 0, latencyMs 0`), incident Recovered → Healthy |
+
+One incident, one alert, and the operator restored the *entire release batch* — the caller was never left calling an API contract its callee no longer served.
+
+### 6.4 SLO-aware verification (closes F1-root and most of F5)
+
+The verification loop now requires two signals before declaring Recovered: pod health (as before) **and** the triggering alert no longer firing in Prometheus (`ALERTS{alertname=…, alertstate="firing"}` via the operator's Prometheus client). A rollback that lands on a still-faulty revision now fails verification and walks further back through history within the same incident, instead of reporting a false success. Prometheus being unreachable degrades gracefully to pod-health-only with a logged warning (F8 proved this path live).
+
+### 6.5 Automatic runbook generation
+
+Already implemented in the reliability engine and exposed at `GET /runbooks?incident_id=<id>&format=markdown|json|html` — root cause, full timeline, recovery actions, Helm revisions, verification results, MTTR. Verified live against a real incident (sample in `docs/experiments/`).
+
+### 6.6 Observability
+
+- **Distributed tracing:** Jaeger all-in-one deployed (`k8s/monitoring/jaeger.yaml`); service charts set `OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4318`; order-service and inventory-service traces confirmed arriving in the Jaeger API during the tests.
+- **Monitoring guide:** `docs/monitoring-guide.md` — every dashboard, UI, API endpoint, and port-forward, plus the honest trade-off on centralized logging at this cluster's memory budget.
+- **Automated simulations:** `scripts/05-run-failure-suite.sh` runs all five scenarios non-interactively, measures MTTR, verifies rollbacks landed on clean configs, restores on failure, and writes a timestamped markdown report — cron-schedulable.
+
+## 7. Conclusions
 
 1. **The SLO → Prometheus → Alertmanager → operator → Helm-rollback loop works end-to-end** on a real cluster: every SLO-detected failure was automatically rolled back, with MTTR 137–196 s, dominated ~95 % by detection windows (rule `for:` durations + rate windows + Alertmanager group wait), not by the operator (~1 s decide-and-execute).
 2. **Chaos testing the healer matters as much as chaos testing the services.** The unit-tested, demo-validated operator harbored three interacting defects (F1–F3) that only surfaced under sustained real alert traffic with multi-replica services — the exact conditions integration demos tend to skip.

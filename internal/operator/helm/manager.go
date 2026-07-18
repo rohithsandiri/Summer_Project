@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"sort"
 
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/cli"
@@ -153,7 +154,15 @@ func (c *Client) GetLastHealthyRevision(namespace, name string) (int, error) {
 		}
 	}
 
-	// History is sorted oldest to newest. We search backward from the end.
+	// The Helm SDK's history action returns releases in Kubernetes secret
+	// listing order, which is LEXICOGRAPHIC on the secret name — v9 sorts
+	// after v18 — so "newest last" only holds while a release has fewer
+	// than 10 revisions. Sort numerically or the backward walk below picks
+	// an essentially arbitrary revision (observed live: rollbacks targeting
+	// v9 from v13 and v18).
+	sort.Slice(history, func(i, j int) bool { return history[i].Version < history[j].Version })
+
+	// History is now sorted oldest to newest. We search backward from the end.
 	for i := len(history) - 1; i >= 0; i-- {
 		rel := history[i]
 

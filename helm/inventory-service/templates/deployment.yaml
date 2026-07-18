@@ -79,6 +79,9 @@ spec:
           value: {{ .Values.latencyMs | quote }}
         - name: SERVICE_NAME
           value: {{ .Release.Name | quote }}
+        # ── Distributed tracing (OTLP/HTTP → Jaeger all-in-one) ───────────
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: {{ .Values.otlpEndpoint | default "jaeger:4318" | quote }}
         # ── Resource limits ───────────────────────────────────────────────
         resources:
           {{- toYaml .Values.resources | nindent 10 }}
