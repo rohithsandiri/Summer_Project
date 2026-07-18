@@ -5,13 +5,20 @@
 #
 # How it works:
 #   Prometheus fires alert → Alertmanager routes by "severity=critical" →
-#   HTTP POST to rollback-operator:8080/webhook → operator calls helm rollback
+#   HTTP POST to rollback-operator:8090/webhook → operator calls helm rollback
+#
+# NOTE ON NAMESPACE: the Prometheus Operator scopes every AlertmanagerConfig to
+# only match alerts whose `namespace` LABEL equals the namespace the
+# AlertmanagerConfig object itself lives in (a multi-tenancy safety net). Our
+# SLO alerts carry `namespace: default` (the workload namespace), so this
+# object must also live in `default` — not `monitoring` — or the route never
+# matches and every alert falls through to the "null" receiver.
 
 apiVersion: monitoring.coreos.com/v1alpha1
 kind: AlertmanagerConfig
 metadata:
   name: rollback-routing
-  namespace: monitoring
+  namespace: default
   labels:
     release: monitoring
 spec:
@@ -39,7 +46,7 @@ spec:
   # ── Rollback operator webhook ──────────────────────────────────────────
   - name: rollback-operator
     webhookConfigs:
-    - url: "http://rollback-operator.default.svc.cluster.local:8080/webhook"
+    - url: "http://rollback-operator.default.svc.cluster.local:8090/webhook"
       sendResolved: true      # Also notify when alert resolves (for MTTR calculation)
       httpConfig:
         tlsConfig:

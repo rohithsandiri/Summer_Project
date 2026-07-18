@@ -79,6 +79,13 @@ spec:
           value: {{ .Values.latencyMs | quote }}
         - name: SERVICE_NAME
           value: {{ .Release.Name | quote }}
+        # ── Downstream service URLs (in-cluster Service DNS, port 8080) ────
+        - name: INVENTORY_SERVICE_URL
+          value: "http://inventory-service:8080"
+        - name: PAYMENT_SERVICE_URL
+          value: "http://payment-service:8080"
+        - name: REDIS_URL
+          value: "redis:6379"
         # ── Resource limits ───────────────────────────────────────────────
         resources:
           {{- toYaml .Values.resources | nindent 10 }}

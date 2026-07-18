@@ -1,46 +1,51 @@
 #!/bin/bash
 # scripts/03-generate-traffic.sh
-# Continuously sends traffic to all services so Prometheus has metrics to evaluate.
-# Run this in a dedicated terminal — let it keep running.
+# Continuously sends order-creation traffic to order-service (which in turn
+# calls inventory-service and payment-service internally), so Prometheus has
+# metrics to evaluate. Run this in a dedicated terminal — let it keep running.
 
 set -e
+
+NAMESPACE="default"
+LOCAL_PORT="18080"
 
 echo "Starting traffic generator..."
 echo "Press Ctrl+C to stop"
 echo ""
 
-# Get service URLs
-ORDER_URL=$(minikube service order-service --url 2>/dev/null || echo "http://localhost:8080")
-INVENTORY_URL=$(minikube service inventory-service --url 2>/dev/null || echo "http://localhost:8081")
-PAYMENT_URL=$(minikube service payment-service --url 2>/dev/null || echo "http://localhost:8082")
+# order-service is ClusterIP-only inside the cluster, so port-forward it to
+# the host rather than relying on `minikube service` (which needs NodePort).
+kubectl port-forward -n "$NAMESPACE" svc/order-service "${LOCAL_PORT}:8080" >/tmp/order-service-port-forward.log 2>&1 &
+PF_PID=$!
+trap 'echo ""; echo "Stopping traffic generator..."; kill $PF_PID 2>/dev/null; exit 0' INT TERM
 
-echo "Sending traffic to:"
-echo "  Orders:    $ORDER_URL"
-echo "  Inventory: $INVENTORY_URL"
-echo "  Payment:   $PAYMENT_URL"
+# Wait for the port-forward to become ready
+for i in $(seq 1 20); do
+    if curl -sf "http://localhost:${LOCAL_PORT}/health" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+
+ORDER_URL="http://localhost:${LOCAL_PORT}"
+echo "Sending traffic to order-service via port-forward: ${ORDER_URL}"
 echo ""
 
-# Continuous loop — sends ~10 requests/second to each service
+SKUS=("SKU-001" "SKU-002" "SKU-003" "SKU-004" "SKU-005")
+
+# Continuous loop — sends ~2 order-creation requests/second
 i=0
 while true; do
     i=$((i + 1))
+    sku=${SKUS[$((i % 5))]}
 
-    # Order service endpoints
-    curl -sf "${ORDER_URL}/api/orders" > /dev/null 2>&1 &
-    curl -sf "${ORDER_URL}/api/orders/create" > /dev/null 2>&1 &
-    curl -sf "${ORDER_URL}/api/orders/status" > /dev/null 2>&1 &
+    curl -sf -X POST "${ORDER_URL}/orders" \
+        -H "Content-Type: application/json" \
+        -d "{\"customer_id\":\"cust-${i}\",\"currency\":\"USD\",\"items\":[{\"item_id\":\"${sku}\",\"quantity\":1,\"unit_price\":1000}]}" \
+        > /dev/null 2>&1 &
 
-    # Inventory service endpoints
-    curl -sf "${INVENTORY_URL}/api/inventory" > /dev/null 2>&1 &
-    curl -sf "${INVENTORY_URL}/api/inventory/check" > /dev/null 2>&1 &
-
-    # Payment service endpoints
-    curl -sf "${PAYMENT_URL}/api/payment/process" > /dev/null 2>&1 &
-    curl -sf "${PAYMENT_URL}/api/payment/status" > /dev/null 2>&1 &
-
-    # Print status every 10 iterations
     if (( i % 10 == 0 )); then
-        echo "[$(date +%H:%M:%S)] Sent $((i * 7)) total requests..."
+        echo "[$(date +%H:%M:%S)] Sent $i order requests..."
     fi
 
     sleep 0.5

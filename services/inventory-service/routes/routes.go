@@ -22,12 +22,15 @@ func Register(
 	m *metrics.Metrics,
 	log *logger.Logger,
 	serviceName string,
+	errorRate float64,
+	latencyMs float64,
 ) {
 	chain := func(next http.HandlerFunc) http.Handler {
 		return middleware.Chain(next,
 			middleware.TraceID(serviceName), // Updated
 			middleware.Logging(log),
 			middleware.MetricsMiddleware(m, serviceName),
+			middleware.Chaos(errorRate, latencyMs),
 			middleware.Recovery(log),
 		)
 	}

@@ -56,7 +56,15 @@ echo "▶ Applying operator RBAC..."
 kubectl apply -f k8s/operator-rbac.yaml
 echo "✓ RBAC applied"
 
-# ── Step 4: Deploy microservices via Helm ────────────────────────────────
+# ── Step 4: Deploy Redis (required by order-service for idempotency/cache) ─
+echo ""
+echo "▶ Deploying Redis..."
+kubectl apply -f k8s/redis/deployment.yaml
+kubectl apply -f k8s/redis/service.yaml
+kubectl rollout status deployment/redis --namespace default --timeout=120s
+echo "✓ Redis deployed"
+
+# ── Step 5: Deploy microservices via Helm ────────────────────────────────
 echo ""
 echo "▶ Deploying microservices..."
 

@@ -28,11 +28,14 @@ spec:
         # Tell helm CLI which namespace to look in
         - name: HELM_NAMESPACE
           value: {{ .Release.Namespace | quote }}
-        # Use in-cluster K8s config (the ServiceAccount token handles auth)
-        - name: KUBERNETES_SERVICE_HOST
-          valueFrom:
-            fieldRef:
-              fieldPath: status.hostIP
+        # Namespace the rollback executor targets for Helm rollbacks
+        - name: TARGET_NAMESPACE
+          value: {{ .Release.Namespace | quote }}
+        # NOTE: KUBERNETES_SERVICE_HOST/PORT are auto-injected by Kubernetes
+        # for every pod and already point at the API server's ClusterIP
+        # (e.g. 10.96.0.1:443). Do NOT override them — doing so (e.g. to the
+        # node's host IP) breaks in-cluster client-go/Helm SDK discovery,
+        # since the node IP doesn't serve the API on port 443.
         resources:
           {{- toYaml .Values.resources | nindent 10 }}
         livenessProbe:

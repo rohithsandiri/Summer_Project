@@ -24,6 +24,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	mathrand "math/rand/v2"
 	"net/http"
 	"strconv"
 	"time"
@@ -191,6 +192,30 @@ func MetricsMiddleware(m *metrics.Metrics, serviceName string) func(http.Handler
 			if rw.status >= 400 {
 				m.ErrorsTotal.WithLabelValues(serviceName, r.Method, r.URL.Path, status).Inc()
 			}
+		})
+	}
+}
+
+// Chaos injects artificial latency and error responses for controlled failure
+// experiments (e.g. `helm upgrade --set errorRate=0.5`). A zero errorRate and
+// zero latencyMs make this a no-op passthrough.
+func Chaos(errorRate float64, latencyMs float64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if latencyMs > 0 {
+				time.Sleep(time.Duration(latencyMs) * time.Millisecond)
+			}
+
+			if errorRate > 0 && mathrand.Float64() < errorRate {
+				traceID := TraceIDFromContext(r)
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set(TraceIDHeader, traceID)
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprintf(w, `{"error":{"code":"CHAOS_INJECTED","message":"injected failure for chaos testing"},"trace_id":%q}`, traceID)
+				return
+			}
+
+			next.ServeHTTP(w, r)
 		})
 	}
 }

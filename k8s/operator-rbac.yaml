@@ -24,15 +24,22 @@ kind: ClusterRole
 metadata:
   name: rollback-operator-role
 rules:
-# Read deployment status (to verify rollback worked)
+# Manage deployments/replicasets — Helm rollback re-applies the target
+# revision's Deployment manifest, so this needs full write access, not just
+# read, to actually perform the rollback (not merely verify it afterward).
 - apiGroups: ["apps"]
   resources: ["deployments", "replicasets"]
-  verbs: ["get", "list", "watch"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
 # Read pod status
 - apiGroups: [""]
   resources: ["pods", "pods/log"]
   verbs: ["get", "list", "watch"]
+
+# Manage Services/ConfigMaps — also part of the Helm-managed chart manifests
+- apiGroups: [""]
+  resources: ["services", "configmaps"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
 # Read/Write Helm release secrets (helm CLI and SDK need this to perform rollback)
 - apiGroups: [""]
@@ -43,6 +50,24 @@ rules:
 - apiGroups: [""]
   resources: ["events"]
   verbs: ["create", "patch"]
+
+# NetworkPolicies, PodDisruptionBudgets, PriorityClasses — also managed by
+# the service Helm charts (helm/*/templates/security.yaml) and re-applied
+# on rollback.
+- apiGroups: ["networking.k8s.io"]
+  resources: ["networkpolicies"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["policy"]
+  resources: ["poddisruptionbudgets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["scheduling.k8s.io"]
+  resources: ["priorityclasses"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# ServiceMonitors — managed by the service Helm charts for Prometheus scraping
+- apiGroups: ["monitoring.coreos.com"]
+  resources: ["servicemonitors"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
 # Manage Argo Rollouts resources
 - apiGroups: ["argoproj.io"]

@@ -41,39 +41,99 @@ func Load() (*Config, error) {
 		promAddr = "http://prometheus-k8s.monitoring.svc:9090"
 	}
 
-	// Initialize default policies
+	// Initialize default policies.
+	// NOTE: AlertName here MUST match the `alert:` name emitted by the
+	// PrometheusRule in k8s/prometheus-rules/slo-alerting-rules.yaml — the
+	// policy engine matches on (Service, AlertName) exact string equality.
 	policies := []models.Policy{
+		// ── order-service ──────────────────────────────────────────────
 		{
-			ID:                "policy-payment-rollback",
-			Service:           "payment-service",
-			AlertName:         "HighErrorRate",
+			ID:                "policy-order-error-rate-rollback",
+			Service:           "order-service",
+			AlertName:         "OrderServiceHighErrorRate",
 			RecommendedAction: models.ActionPrepareRollback,
 			CooldownDuration:  5 * time.Minute,
 			Timeout:           10 * time.Minute,
 			MaxRetries:        3,
 		},
 		{
-			ID:                "policy-gateway-wait",
-			Service:           "api-gateway",
-			AlertName:         "HighLatency",
+			ID:                "policy-order-latency-rollback",
+			Service:           "order-service",
+			AlertName:         "OrderServiceHighLatency",
+			RecommendedAction: models.ActionPrepareRollback,
+			CooldownDuration:  5 * time.Minute,
+			Timeout:           10 * time.Minute,
+			MaxRetries:        3,
+		},
+		{
+			ID:                "policy-order-no-healthy-pods-restart",
+			Service:           "order-service",
+			AlertName:         "OrderServiceNoHealthyPods",
+			RecommendedAction: models.ActionPrepareRestart,
+			CooldownDuration:  3 * time.Minute,
+			Timeout:           5 * time.Minute,
+			MaxRetries:        3,
+		},
+		{
+			ID:                "policy-order-traffic-drop-wait",
+			Service:           "order-service",
+			AlertName:         "OrderServiceTrafficDrop",
 			RecommendedAction: models.ActionWait,
 			CooldownDuration:  2 * time.Minute,
 			Timeout:           5 * time.Minute,
 			MaxRetries:        1,
 		},
+		// ── inventory-service ──────────────────────────────────────────
 		{
-			ID:                "policy-inventory-rollback",
+			ID:                "policy-inventory-error-rate-rollback",
 			Service:           "inventory-service",
-			AlertName:         "PodCrashLoop",
+			AlertName:         "InventoryServiceHighErrorRate",
 			RecommendedAction: models.ActionPrepareRollback,
 			CooldownDuration:  10 * time.Minute,
 			Timeout:           15 * time.Minute,
 			MaxRetries:        2,
 		},
 		{
-			ID:                "policy-order-restart",
-			Service:           "order-service",
-			AlertName:         "ServiceDown",
+			ID:                "policy-inventory-latency-rollback",
+			Service:           "inventory-service",
+			AlertName:         "InventoryServiceHighLatency",
+			RecommendedAction: models.ActionPrepareRollback,
+			CooldownDuration:  10 * time.Minute,
+			Timeout:           15 * time.Minute,
+			MaxRetries:        2,
+		},
+		{
+			ID:                "policy-inventory-no-healthy-pods-restart",
+			Service:           "inventory-service",
+			AlertName:         "InventoryServiceNoHealthyPods",
+			RecommendedAction: models.ActionPrepareRestart,
+			CooldownDuration:  10 * time.Minute,
+			Timeout:           15 * time.Minute,
+			MaxRetries:        2,
+		},
+		// ── payment-service ─────────────────────────────────────────────
+		{
+			ID:                "policy-payment-rollback",
+			Service:           "payment-service",
+			AlertName:         "PaymentServiceHighErrorRate",
+			RecommendedAction: models.ActionPrepareRollback,
+			CooldownDuration:  5 * time.Minute,
+			Timeout:           10 * time.Minute,
+			MaxRetries:        3,
+		},
+		{
+			ID:                "policy-payment-latency-rollback",
+			Service:           "payment-service",
+			AlertName:         "PaymentServiceHighLatency",
+			RecommendedAction: models.ActionPrepareRollback,
+			CooldownDuration:  5 * time.Minute,
+			Timeout:           10 * time.Minute,
+			MaxRetries:        3,
+		},
+		{
+			ID:                "policy-payment-no-healthy-pods-restart",
+			Service:           "payment-service",
+			AlertName:         "PaymentServiceNoHealthyPods",
 			RecommendedAction: models.ActionPrepareRestart,
 			CooldownDuration:  3 * time.Minute,
 			Timeout:           5 * time.Minute,

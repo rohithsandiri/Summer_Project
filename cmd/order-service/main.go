@@ -116,7 +116,7 @@ func main() {
 	// ── 12. Handler + Routes ──────────────────────────────────────────────────
 	h := handler.New(svc, healthHandler)
 	mux := http.NewServeMux()
-	routes.Register(mux, h, m, log_, cfg.ServiceName)
+	routes.Register(mux, h, m, log_, cfg.ServiceName, cfg.ErrorRate, cfg.LatencyMS)
 
 	// ── 13. HTTP Server + Graceful Shutdown ───────────────────────────────────
 	server := &http.Server{

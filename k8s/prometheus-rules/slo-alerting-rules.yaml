@@ -32,9 +32,9 @@ spec:
     - alert: OrderServiceHighErrorRate
       expr: |
         (
-          rate(http_requests_total{job="order-service", status_code="500"}[2m])
+          sum(rate(http_requests_total{job="order-service", status_code="500"}[2m]))
           /
-          rate(http_requests_total{job="order-service"}[2m])
+          sum(rate(http_requests_total{job="order-service"}[2m]))
         ) > 0.05
       for: 1m
       labels:
@@ -106,9 +106,9 @@ spec:
     - alert: InventoryServiceHighErrorRate
       expr: |
         (
-          rate(http_requests_total{job="inventory-service", status_code="500"}[2m])
+          sum(rate(http_requests_total{job="inventory-service", status_code="500"}[2m]))
           /
-          rate(http_requests_total{job="inventory-service"}[2m])
+          sum(rate(http_requests_total{job="inventory-service"}[2m]))
         ) > 0.05
       for: 1m
       labels:
@@ -159,9 +159,9 @@ spec:
     - alert: PaymentServiceHighErrorRate
       expr: |
         (
-          rate(http_requests_total{job="payment-service", status_code="500"}[2m])
+          sum(rate(http_requests_total{job="payment-service", status_code="500"}[2m]))
           /
-          rate(http_requests_total{job="payment-service"}[2m])
+          sum(rate(http_requests_total{job="payment-service"}[2m]))
         ) > 0.01
       for: 1m
       labels:

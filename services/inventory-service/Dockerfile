@@ -4,12 +4,12 @@
 # Switched to gcr.io/distroless/static-debian12:nonroot for minimal attack surface.
 
 # ── Stage 1: Builder ──────────────────────────────────────────────────────────
-FROM golang:1.23-bookworm AS builder
+FROM golang:1.25-bookworm AS builder
 
 WORKDIR /app
 
 COPY go.mod go.sum ./
-RUN go mod download --verify
+RUN go mod download
 
 COPY . .
 

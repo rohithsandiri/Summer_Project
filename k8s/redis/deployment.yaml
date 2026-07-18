@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: redis
-  namespace: cloud-native-platform
+  namespace: default
   labels:
     app: redis
     tier: cache
@@ -45,8 +45,6 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
-          healthcheck: # docker equivalent, but in K8s we use liveness/readiness
-            nil
           livenessProbe:
             exec:
               command:

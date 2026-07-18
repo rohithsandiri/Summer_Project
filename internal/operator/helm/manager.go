@@ -151,8 +151,12 @@ func (c *Client) GetLastHealthyRevision(namespace, name string) (int, error) {
 			continue
 		}
 
-		// A release is a viable rollback target if its status is "deployed" (which means it was successfully configured).
-		if rel.Info != nil && rel.Info.Status == release.StatusDeployed {
+		// A release is a viable rollback target if it was ever successfully deployed.
+		// Helm only marks the single *current* revision "deployed" — every earlier
+		// revision that was itself once successfully deployed is marked "superseded"
+		// once a newer revision replaces it, so both statuses count as healthy here.
+		// Only "failed" (and other non-terminal) revisions are excluded.
+		if rel.Info != nil && (rel.Info.Status == release.StatusDeployed || rel.Info.Status == release.StatusSuperseded) {
 			return rel.Version, nil
 		}
 	}
