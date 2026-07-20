@@ -28,6 +28,15 @@ type Config struct {
 	// back tightly-coupled services co-released within BatchWindow too.
 	DependencyRollbackEnabled bool
 	DependencyBatchWindow     time.Duration
+
+	// Self-maintaining dependency graph: derive edges from real observed
+	// traffic (via Jaeger's dependency API) instead of only the hand-declared
+	// topology, refreshed on an interval. Empty JaegerQueryAddr disables it
+	// and falls back to the static graph alone.
+	JaegerQueryAddr                string
+	DependencyGraphRefreshInterval time.Duration
+	DependencyGraphLookback        time.Duration
+	DependencyGraphMinCallCount    int
 }
 
 func Load() (*Config, error) {
@@ -219,6 +228,32 @@ func Load() (*Config, error) {
 		}
 	}
 
+	jaegerAddr := os.Getenv("JAEGER_QUERY_ADDR")
+	if jaegerAddr == "" {
+		jaegerAddr = "http://jaeger.monitoring.svc.cluster.local:16686"
+	}
+	if os.Getenv("DEPENDENCY_GRAPH_DYNAMIC_ENABLED") == "false" {
+		jaegerAddr = ""
+	}
+	depRefreshInterval := 2 * time.Minute
+	if v := os.Getenv("DEPENDENCY_GRAPH_REFRESH_SECONDS"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			depRefreshInterval = time.Duration(secs) * time.Second
+		}
+	}
+	depLookback := 30 * time.Minute
+	if v := os.Getenv("DEPENDENCY_GRAPH_LOOKBACK_MINUTES"); v != "" {
+		if mins, err := strconv.Atoi(v); err == nil && mins > 0 {
+			depLookback = time.Duration(mins) * time.Minute
+		}
+	}
+	depMinCallCount := 3
+	if v := os.Getenv("DEPENDENCY_GRAPH_MIN_CALL_COUNT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			depMinCallCount = n
+		}
+	}
+
 	leEnabled := os.Getenv("LEADER_ELECTION_ENABLED") == "true"
 	leID := os.Getenv("POD_NAME")
 	if leID == "" {
@@ -241,6 +276,11 @@ func Load() (*Config, error) {
 
 		DependencyRollbackEnabled: depEnabled,
 		DependencyBatchWindow:     depWindow,
+
+		JaegerQueryAddr:                jaegerAddr,
+		DependencyGraphRefreshInterval: depRefreshInterval,
+		DependencyGraphLookback:        depLookback,
+		DependencyGraphMinCallCount:    depMinCallCount,
 	}
 
 	if err := cfg.Validate(); err != nil {

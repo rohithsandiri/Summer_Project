@@ -188,7 +188,26 @@ func main() {
 	// back tightly-coupled services co-released with the faulty revision so
 	// callers aren't stranded on API contracts the rollback removed.
 	if cfg.DependencyRollbackEnabled {
-		depGraph := dependency.NewGraph()
+		seedGraph := dependency.NewGraph() // hand-declared topology, also the safety-net floor
+
+		var depGraph dependency.DependencyGraph = seedGraph
+		if cfg.JaegerQueryAddr != "" {
+			jaegerClient := dependency.NewHTTPJaegerClient(cfg.JaegerQueryAddr)
+			liveGraph := dependency.NewJaegerDependencyGraph(
+				jaegerClient, seedGraph,
+				cfg.DependencyGraphLookback, cfg.DependencyGraphMinCallCount, log,
+			)
+			go liveGraph.Run(ctx, cfg.DependencyGraphRefreshInterval)
+			depGraph = liveGraph
+			log.Info(ctx, "self-maintaining dependency graph enabled: observed edges from Jaeger merged with static seed", logger.Fields{},
+				"jaeger_addr", cfg.JaegerQueryAddr,
+				"refresh_interval", cfg.DependencyGraphRefreshInterval.String(),
+				"lookback", cfg.DependencyGraphLookback.String(),
+				"min_call_count", cfg.DependencyGraphMinCallCount)
+		} else {
+			log.Info(ctx, "dependency graph running static-only (JAEGER_QUERY_ADDR unset or dynamic discovery disabled)", logger.Fields{})
+		}
+
 		depCoordinator := dependency.NewCoordinator(depGraph, helmClient, cooldownManager, log, cfg.DependencyBatchWindow, 5*time.Minute)
 		incidentManager.SetDependencyCoordinator(depCoordinator)
 		log.Info(ctx, "dependency-aware batch rollback enabled", logger.Fields{}, "batch_window", cfg.DependencyBatchWindow.String())

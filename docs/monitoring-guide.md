@@ -78,6 +78,12 @@ kubectl port-forward -n monitoring svc/jaeger 16686:16686
 
 The services export OTLP/HTTP spans (see `internal/shared/otel`); the charts point `OTEL_EXPORTER_OTLP_ENDPOINT` at `jaeger:4318` by default. Select a service (e.g. `order-service`) in the UI to follow a request across order → inventory/payment, including spans during chaos injection.
 
+**This is also the operator's dependency-graph source.** `System Architecture → DAG` in the Jaeger UI renders the same edges the operator's dependency coordinator uses for batch rollback — what you see there is what it acts on. Query it directly the same way the operator does:
+
+```bash
+curl "http://localhost:16686/api/dependencies?endTs=$(date +%s000)&lookback=1800000" | python3 -m json.tool
+```
+
 ## 6. Logs
 
 Operator (structured JSON, one line per pipeline step — the primary audit trail):

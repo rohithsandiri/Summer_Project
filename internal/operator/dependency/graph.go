@@ -23,16 +23,37 @@ type Graph struct {
 }
 
 func NewGraph() *Graph {
-	g := &Graph{
-		nodes: make(map[string]*Node),
-	}
+	g := NewEmptyGraph()
 
-	// Pre-populate system topology as specified in phase specification
+	// Pre-populate system topology as specified in phase specification.
+	// This hand-declared graph is also used as the safety-net seed for
+	// JaegerDependencyGraph (see jaeger.go): known contract relationships
+	// that must never disappear just because traffic was briefly quiet.
 	g.AddEdge("api-gateway", "order-service")
 	g.AddEdge("order-service", "inventory-service")
 	g.AddEdge("order-service", "payment-service")
 
 	return g
+}
+
+// NewEmptyGraph returns a graph with no pre-populated edges, for callers
+// (such as trace-derived graph builders) that construct topology themselves.
+func NewEmptyGraph() *Graph {
+	return &Graph{
+		nodes: make(map[string]*Node),
+	}
+}
+
+// Edges returns every (parent, child) pair currently in the graph. Order is
+// unspecified. Used for merging and diffing graph snapshots.
+func (g *Graph) Edges() [][2]string {
+	var edges [][2]string
+	for _, n := range g.nodes {
+		for _, c := range n.Children {
+			edges = append(edges, [2]string{n.ID, c.ID})
+		}
+	}
+	return edges
 }
 
 func (g *Graph) ensureNode(id string) *Node {

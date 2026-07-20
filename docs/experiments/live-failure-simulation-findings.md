@@ -217,6 +217,37 @@ Already implemented in the reliability engine and exposed at `GET /runbooks?inci
 - **Monitoring guide:** `docs/monitoring-guide.md` — every dashboard, UI, API endpoint, and port-forward, plus the honest trade-off on centralized logging at this cluster's memory budget.
 - **Automated simulations:** `scripts/05-run-failure-suite.sh` runs all five scenarios non-interactively, measures MTTR, verifies rollbacks landed on clean configs, restores on failure, and writes a timestamped markdown report — cron-schedulable.
 
+## 6.7 Self-maintaining dependency graph (replaces the static graph)
+
+The dependency graph used for batch rollback (§6.3) was originally hand-written in code (`dependency.NewGraph()`: three `AddEdge` calls). That's a maintenance liability — a new service or a new call path silently doesn't participate in batch rollback until someone edits the graph and redeploys the operator. This was replaced with a **self-maintaining, trace-derived graph**.
+
+**Approach survey.** Production root-cause-analysis systems solve "what calls what" the same way: build the graph from observed traffic rather than declare it.
+
+- **Trace-based construction** — Microscope and MicroHECL (used in production at Alibaba) build their service call graph dynamically from distributed traces / network-connection data each analysis cycle, rather than from a static topology file ([Microscope, ICSOC 2018](https://link.springer.com/chapter/10.1007/978-3-030-03596-9_1); [MicroHECL, ICSE-SEIP 2021](https://arxiv.org/abs/2103.01782)). A broader OpenTelemetry-trace-based pipeline using this technique for RCA reports 60–78% faster root-cause identification than manual graphs ([survey discussion](https://arxiv.org/html/2408.00803v1)).
+- **eBPF / kernel-level discovery** (Cilium Hubble, Pixie) — zero-instrumentation service maps built from every observed TCP connection at the kernel, no app-level tracing required ([Cilium service map](https://cilium.io/use-cases/service-map/)).
+- **Static manifest analysis** — infer edges from Deployment env vars / K8s NetworkPolicies at rollout time; cheap, but only as accurate as naming conventions and doesn't reflect what's actually called.
+- **Service mesh telemetry** (Istio + Kiali) — sidecar-reported call graph; accurate but requires a full mesh install.
+- **ML/causal graphs** — Microscope's own causality-graph phase and GNN-based approaches infer edges from statistical correlation of golden-signal time series rather than explicit calls; built for root-cause *ranking*, heavier than this use case needs.
+
+**Chosen approach: trace-based, via Jaeger's own dependency API.** Jaeger (already deployed for tracing, §6.6) exposes `GET /api/dependencies?endTs&lookback`, returning aggregated `(parent, child, callCount)` edges computed from stored spans — the same trace-based technique the research above uses, with zero additional infrastructure since the OTLP wiring already exists.
+
+**Design (`internal/operator/dependency/jaeger.go`):**
+- `JaegerDependencyGraph` polls this endpoint on an interval (default 2 min, `DEPENDENCY_GRAPH_REFRESH_SECONDS`) over a lookback window (default 30 min, `DEPENDENCY_GRAPH_LOOKBACK_MINUTES`) and atomically swaps in a fresh graph — no operator restart, no redeploy, a new service or new call path is picked up the refresh cycle after it starts being called.
+- **Safety net, not a replacement:** each refresh *merges* observed edges with the hand-declared seed graph rather than replacing it. A known contract relationship must not vanish from the graph just because traffic was quiet in the last lookback window — that would silently disable batch rollback for it during the exact moment (an active incident) it's needed. On Jaeger being unreachable, the previous snapshot (seed-only at cold start) is kept and a warning logged — never an empty graph.
+- **Noise filtering:** edges below `DEPENDENCY_GRAPH_MIN_CALL_COUNT` (default 3) are dropped, so a single stray request doesn't wire in a spurious batch-rollback relationship. Self-loops are dropped outright.
+- Every refresh diffs against the previous snapshot and logs `edges_added` / `edges_removed` — the graph's evolution is itself part of the audit trail feeding the runbook.
+- Set `DEPENDENCY_GRAPH_DYNAMIC_ENABLED=false` to fall back to the static graph only.
+
+**Testing:** 6 unit tests (`internal/operator/dependency/jaeger_test.go`) against a fake Jaeger client — merge-with-seed, new-service-discovered-without-restart (polls until a fabricated `notification-service` edge appears), fallback-when-unreachable, noise-threshold filtering, self-loop rejection, and 20-goroutine concurrent-read-during-refresh under `-race`. All pass.
+
+**Honest limitation:** batch-window membership (§6.3) is still inferred from Helm deploy-time proximity, not an explicit release identifier — the dynamic graph fixes *which services are coupled*, not *which deploys belong to the same release*. A CI/CD pipeline stamping a shared batch/release ID on co-deployed Helm revisions would close that remaining gap.
+
+**Live verification:** pending — the local cluster was down (Docker Desktop not running) when this was implemented. Unit tests confirm correctness in isolation; cluster verification (confirm `edges_added` in operator logs reflecting real order↔inventory traffic, and that batch rollback consults the live graph) is the next step once the cluster is back up.
+
+## 6.8 Pre-existing issue discovered (not fixed, flagged)
+
+Running the full suite with `-race` (previously only run selectively on individual packages) surfaced a **pre-existing data race** in `internal/operator/incident/manager.go`, unrelated to any change in this document: `ProcessAlert` dispatches `go mgr.runRecoveryPipeline(ctx, incident, ...)` and then continues mutating the same `*models.Incident` pointer (`incident.DecisionHistory`, `incident.LastUpdate`) in the calling goroutine while the dispatched goroutine concurrently calls `stateMachine.Transition`, which also writes incident fields. Under concurrent alerts this is undefined behavior — not silently benign — and could corrupt incident state. Not fixed here (out of scope for this session's ask); worth a follow-up: either snapshot/copy the incident before dispatch, or guard the `Incident` struct's mutable fields with a mutex.
+
 ## 7. Conclusions
 
 1. **The SLO → Prometheus → Alertmanager → operator → Helm-rollback loop works end-to-end** on a real cluster: every SLO-detected failure was automatically rolled back, with MTTR 137–196 s, dominated ~95 % by detection windows (rule `for:` durations + rate windows + Alertmanager group wait), not by the operator (~1 s decide-and-execute).
