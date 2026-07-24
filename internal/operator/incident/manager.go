@@ -480,14 +480,56 @@ func (mgr *Manager) runRecoveryPipeline(
 			// faulty revision share its API contracts — roll them back too so
 			// callers aren't left invoking endpoints that no longer exist.
 			if mgr.depCoordinator != nil && plan.DesiredAction == models.ActionPrepareRollback {
+				peerStart := time.Now().UTC()
 				peers := mgr.depCoordinator.RollbackBatchPeers(ctx, plan.ServiceID, k8sNamespace, executionResult.OldRevision, traceID)
 				for _, p := range peers {
-					if mgr.timeline != nil {
-						if p.RolledBack {
-							_ = mgr.timeline.Record(ctx, incident.ID, fmt.Sprintf("Dependency batch rollback: co-released peer %s rolled back to revision %d (%s)", p.Service, p.TargetRev, p.Reason))
-						} else {
+					switch {
+					case p.RolledBack && p.Verified:
+						if mgr.timeline != nil {
+							_ = mgr.timeline.Record(ctx, incident.ID, fmt.Sprintf("Dependency batch rollback: co-released peer %s rolled back to revision %d and verified healthy (%s)", p.Service, p.TargetRev, p.Reason))
+						}
+						mgr.m.DependencyBatchRollbacksTotal.WithLabelValues(p.Service, k8sNamespace, "verified").Inc()
+						mgr.m.LastSuccessfulRollbackTime.WithLabelValues(p.Service).Set(float64(time.Now().Unix()))
+					case p.RolledBack && !p.Verified:
+						// Rolled back but not confirmed healthy: the same
+						// false-success risk F1 found for primary rollbacks
+						// (§6.4). Surface it loudly instead of reporting a
+						// silent success, and keep it in the audit trail so
+						// it isn't lost the moment this incident closes.
+						mgr.log.Error(ctx, "dependency batch peer rolled back but unverified — needs manual investigation", logger.Fields{
+							TraceID: traceID, IncidentID: incident.ID, Service: p.Service,
+						}, "target_revision", p.TargetRev, "reason", p.Reason)
+						if mgr.timeline != nil {
+							_ = mgr.timeline.Record(ctx, incident.ID, fmt.Sprintf("WARNING: dependency peer %s rolled back to revision %d but did not verify healthy: %s", p.Service, p.TargetRev, p.Reason))
+						}
+						mgr.m.DependencyBatchRollbacksTotal.WithLabelValues(p.Service, k8sNamespace, "unverified").Inc()
+					default:
+						if mgr.timeline != nil {
 							_ = mgr.timeline.Record(ctx, incident.ID, fmt.Sprintf("Dependency peer %s not rolled back: %s", p.Service, p.Reason))
 						}
+					}
+
+					// Batch peer rollbacks are otherwise invisible to MTTR
+					// dashboards and the runbook endpoint (GET /runbooks),
+					// which both read rollback_history — record them there
+					// too, keyed to the same incident as the primary.
+					if p.RolledBack && mgr.rollbackStore != nil {
+						verificationResult := "Success"
+						if !p.Verified {
+							verificationResult = "Unverified"
+						}
+						_ = mgr.rollbackStore.RecordRollback(ctx, &models.RollbackHistory{
+							IncidentID:         incident.ID,
+							Service:            p.Service,
+							Namespace:          k8sNamespace,
+							HelmRelease:        p.Service,
+							RollbackRevision:   p.TargetRev,
+							StartTime:          peerStart,
+							FinishTime:         time.Now().UTC(),
+							RecoveryDuration:   time.Since(peerStart),
+							VerificationResult: verificationResult,
+							OperatorVersion:    "dependency-batch",
+						})
 					}
 				}
 			}

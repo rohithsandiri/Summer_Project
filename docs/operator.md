@@ -19,8 +19,10 @@ Evaluates target availability, latency targets (p95/p99), and error rate ceiling
 Calculates the rate at which a service is consuming its remaining error budget (burn rate: 14.4x consumes 2% of budget in 1 hour; 1.0x consumes budget over 30 days). If the remaining budget drops below `10%` or the burn rate exceeds `14.4`, the recovery priority is elevated.
 
 ### 2.3 Dependency Graph & Root Cause Analyzer (`internal/operator/dependency` & `internal/operator/rootcause`)
-- **Dependency Graph**: Builds a map of microservice dependencies (e.g. `api-gateway` -> `order-service` -> `payment-service`).
+- **Dependency Graph**: Builds a map of microservice dependencies (e.g. `api-gateway` -> `order-service` -> `payment-service`), self-maintained from live Jaeger trace data and merged with a hand-declared seed (see `internal/operator/dependency/jaeger.go`).
 - **RCA Analyzer**: Evaluates which service in the graph is the root cause by cross-referencing latency peaks and error metrics.
+- **Batch Rollback Coordinator (`internal/operator/dependency/coordinator.go`)**: after a primary rollback, rolls back direct callers/callees that were deployed in the same release batch, so a caller isn't left invoking a contract its rolled-back callee no longer serves. Peer rollbacks are now health-verified (`Coordinator.WithVerifier`) and recorded to `rollback_history`/metrics, not just the incident timeline — see `docs/experiments/live-failure-simulation-findings.md` §8 for the specific gap this closed.
+- **Data safety across rollback**: see [`docs/data-safety-and-migrations.md`](data-safety-and-migrations.md) for how the business services (stateless, in-memory) and the operator's own Postgres audit-trail schema (versioned, forward-only migrations with a startup compatibility guard) each handle rollback.
 
 ---
 

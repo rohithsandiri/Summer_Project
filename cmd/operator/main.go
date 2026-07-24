@@ -208,7 +208,8 @@ func main() {
 			log.Info(ctx, "dependency graph running static-only (JAEGER_QUERY_ADDR unset or dynamic discovery disabled)", logger.Fields{})
 		}
 
-		depCoordinator := dependency.NewCoordinator(depGraph, helmClient, cooldownManager, log, cfg.DependencyBatchWindow, 5*time.Minute)
+		depCoordinator := dependency.NewCoordinator(depGraph, helmClient, cooldownManager, log, cfg.DependencyBatchWindow, 5*time.Minute).
+			WithVerifier(verifierInstance, 60*time.Second)
 		incidentManager.SetDependencyCoordinator(depCoordinator)
 		log.Info(ctx, "dependency-aware batch rollback enabled", logger.Fields{}, "batch_window", cfg.DependencyBatchWindow.String())
 	}

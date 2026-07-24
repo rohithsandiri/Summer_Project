@@ -248,7 +248,90 @@ The dependency graph used for batch rollback (§6.3) was originally hand-written
 
 Running the full suite with `-race` (previously only run selectively on individual packages) surfaced a **pre-existing data race** in `internal/operator/incident/manager.go`, unrelated to any change in this document: `ProcessAlert` dispatches `go mgr.runRecoveryPipeline(ctx, incident, ...)` and then continues mutating the same `*models.Incident` pointer (`incident.DecisionHistory`, `incident.LastUpdate`) in the calling goroutine while the dispatched goroutine concurrently calls `stateMachine.Transition`, which also writes incident fields. Under concurrent alerts this is undefined behavior — not silently benign — and could corrupt incident state. Not fixed here (out of scope for this session's ask); worth a follow-up: either snapshot/copy the incident before dispatch, or guard the `Incident` struct's mutable fields with a mutex.
 
-## 7. Conclusions
+## 8. Part 3 — Dependency Batch-Rollback Hardening & Database Rollback Safety (2026-07-25)
+
+A code review of the batch-rollback coordinator (§6.3) and an audit of how
+the platform handles persistent data across a rollback, prompted by the
+question "if a callee fails and rolls back, do we also roll back callers
+still on the new contract — and what happens to any database involved?"
+
+### F9 — Batch peer rollback claimed the shared execution gate before knowing it would execute  **[FIXED]**
+
+`Coordinator.considerPeer` claimed `CooldownManager.TryStartExecution` —
+the same per-service gate the alert-driven pipeline uses to prevent
+oscillation (F3) — *before* calling `GetLastHealthyRevision`. If that lookup
+failed (e.g. every historical revision for the peer was `Superseded`/`Failed`,
+none `Deployed`), the gate was still consumed for the full `gateWindow` (5 min
+default) even though no rollback was ever attempted. A legitimate alert
+firing for that same peer moments later would find its execution gate already
+claimed and be suppressed into `Waiting` — the exact false-suppression
+scenario F5 already flagged, but reachable here without any real rollback
+having happened at all.
+
+**Fix:** the target revision is now resolved *before* the gate is claimed;
+the gate is only consumed once a rollback is actually about to be executed.
+Regression test: `TestPeerGateNotClaimedWhenNoHealthyTarget`.
+
+### F10 — Batch peer rollbacks were reported successful without any health check  **[FIXED]**
+
+Unlike the primary rollback (which gained SLO-aware verification in §6.4
+specifically because pod health alone is a false signal — F1's root cause),
+`considerPeer` returned `RolledBack: true` the instant the Helm SDK's
+`Rollback` call returned, with no verification step at all. A peer rolled
+back onto a revision that never comes up healthy (image pull failure, a
+second latent fault, anything) was indistinguishable from a fully healthy
+recovery in the incident timeline.
+
+**Fix:** `Coordinator.WithVerifier` wires in the same `VerificationEngine`
+the primary path uses (structurally, via a local `PodVerifier` interface —
+no import coupling between the `dependency` and `verification` packages).
+`PeerResult` now carries a `Verified` field separate from `RolledBack`; an
+unverified peer rollback is logged at `ERROR` and recorded with
+`VerificationResult: "Unverified"` rather than silently reported as a
+success. Regression test: `TestPeerRolledBackButUnverified`.
+
+### F11 — Batch peer rollbacks were invisible to MTTR dashboards and runbooks  **[FIXED]**
+
+Peer rollback outcomes were only ever written to the incident's text
+timeline. `rollback_history` (the table `ListRollbacks`, the MTTR dashboards,
+and the `GET /runbooks` endpoint all read) never got an entry for a batch
+peer, and no Prometheus metric distinguished a peer rollback from a primary
+one. A dependency-driven recovery of `inventory-service` while `order-service`
+was the alert-triggered primary would show up nowhere except a log line.
+
+**Fix:** every `RolledBack` peer result is now recorded via
+`rollbackStore.RecordRollback` (same table, same incident ID as the primary)
+and counted in a new `operator_dependency_batch_rollbacks_total{service,
+namespace, result}` metric (`result` ∈ `verified` / `unverified`).
+
+### Database rollback safety (the "what about the data" question)
+
+Investigated directly rather than assumed. Full writeup:
+[`docs/data-safety-and-migrations.md`](../data-safety-and-migrations.md).
+Summary:
+
+- **The three business microservices have no persistent datastore at all** —
+  `services/*/repository/repository.go` are in-memory maps. A Helm rollback
+  cannot lose or corrupt their data because a pod restart already discards it
+  regardless of which revision is live. No migration story is needed for them
+  today.
+- **The operator's own Postgres incident-audit store is the platform's one
+  real, persistent schema.** Its `migrate()` used to be an unconditional list
+  of `CREATE TABLE IF NOT EXISTS` statements with no version tracking. It is
+  now a versioned, forward-only migration runner
+  (`internal/operator/storage/migrations.go`) with an expand/contract
+  discipline and a startup **compatibility guard**: the operator refuses to
+  boot if the database carries a migration marked `Breaking` whose version
+  exceeds what the running binary understands — the exact fingerprint of the
+  operator's own Helm release having been rolled back past a schema change
+  its code no longer matches. This turns a silent data-corruption/crash risk
+  into a loud, actionable startup failure, and mirrors F1's core lesson
+  (verify, don't assume success) one layer down, at the schema level instead
+  of the SLO level.
+
+---
+
+## 9. Conclusions
 
 1. **The SLO → Prometheus → Alertmanager → operator → Helm-rollback loop works end-to-end** on a real cluster: every SLO-detected failure was automatically rolled back, with MTTR 137–196 s, dominated ~95 % by detection windows (rule `for:` durations + rate windows + Alertmanager group wait), not by the operator (~1 s decide-and-execute).
 2. **Chaos testing the healer matters as much as chaos testing the services.** The unit-tested, demo-validated operator harbored three interacting defects (F1–F3) that only surfaced under sustained real alert traffic with multi-replica services — the exact conditions integration demos tend to skip.

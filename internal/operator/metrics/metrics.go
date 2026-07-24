@@ -36,6 +36,14 @@ type OperatorMetrics struct {
 	PrometheusQueriesTotal prometheus.Counter
 	DecisionConfidence     prometheus.Gauge
 
+	// DependencyBatchRollbacksTotal counts co-released peer rollbacks issued
+	// by the dependency coordinator, distinct from RollbacksTotal (which
+	// counts primary alert-driven rollbacks). result is one of
+	// "verified" (rolled back and confirmed healthy),
+	// "unverified" (rolled back but did not confirm healthy in time), or
+	// "failed" (the Helm rollback call itself failed).
+	DependencyBatchRollbacksTotal *prometheus.CounterVec
+
 	RolloutsTotal              prometheus.Counter
 	RolloutDurationSeconds     *prometheus.HistogramVec
 	RolloutFailuresTotal       prometheus.Counter
@@ -131,6 +139,14 @@ func New() *OperatorMetrics {
 				Help: "Total number of verification failures",
 			},
 			[]string{"service"},
+		),
+
+		DependencyBatchRollbacksTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "operator_dependency_batch_rollbacks_total",
+				Help: "Total number of co-released peer rollbacks issued by the dependency coordinator, by outcome",
+			},
+			[]string{"service", "namespace", "result"},
 		),
 
 		RecoveryDurationSeconds: prometheus.NewHistogramVec(
@@ -280,6 +296,7 @@ func New() *OperatorMetrics {
 		m.FailedRollbacksTotal,
 		m.VerificationsTotal,
 		m.VerificationFailuresTotal,
+		m.DependencyBatchRollbacksTotal,
 		m.RecoveryDurationSeconds,
 		m.LastSuccessfulRollbackTime,
 		m.RetryTotal,

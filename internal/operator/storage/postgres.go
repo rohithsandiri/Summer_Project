@@ -75,82 +75,9 @@ func NewPostgresIncidentStore(db *sql.DB) (*PostgresIncidentStore, error) {
 	return s, nil
 }
 
-func (s *PostgresIncidentStore) migrate() error {
-	queries := []string{
-		`CREATE TABLE IF NOT EXISTS incidents (
-			id VARCHAR(128) PRIMARY KEY,
-			alert_id VARCHAR(128),
-			service VARCHAR(128),
-			severity VARCHAR(64),
-			alert_name VARCHAR(128),
-			start_time TIMESTAMP WITH TIME ZONE,
-			last_update TIMESTAMP WITH TIME ZONE,
-			status VARCHAR(64),
-			current_state VARCHAR(64),
-			history TEXT,
-			recovery_attempts INT DEFAULT 0,
-			decision_history TEXT,
-			namespace VARCHAR(128),
-			labels TEXT,
-			annotations TEXT,
-			root_cause TEXT,
-			decision TEXT,
-			recovery_action TEXT,
-			helm_release VARCHAR(128),
-			rollback_revision INT DEFAULT 0,
-			end_time TIMESTAMP WITH TIME ZONE,
-			duration_seconds DOUBLE PRECISION DEFAULT 0.0,
-			verification_result TEXT,
-			operator_version VARCHAR(64),
-			recovery_confidence DOUBLE PRECISION DEFAULT 0.0,
-			slo_snapshot TEXT,
-			burn_rate DOUBLE PRECISION DEFAULT 0.0,
-			error_budget DOUBLE PRECISION DEFAULT 0.0,
-			deployment_revision VARCHAR(128)
-		);`,
-		`CREATE TABLE IF NOT EXISTS timeline_events (
-			id VARCHAR(128) PRIMARY KEY,
-			incident_id VARCHAR(128) NOT NULL,
-			timestamp TIMESTAMP WITH TIME ZONE,
-			message TEXT
-		);`,
-		`CREATE TABLE IF NOT EXISTS rollback_history (
-			incident_id VARCHAR(128),
-			service VARCHAR(128),
-			namespace VARCHAR(128),
-			helm_release VARCHAR(128),
-			old_revision INT,
-			rollback_revision INT,
-			start_time TIMESTAMP WITH TIME ZONE,
-			finish_time TIMESTAMP WITH TIME ZONE,
-			recovery_duration_ns BIGINT,
-			verification_result VARCHAR(64),
-			operator_version VARCHAR(64)
-		);`,
-		`CREATE TABLE IF NOT EXISTS decision_history (
-			incident_id VARCHAR(128),
-			timestamp TIMESTAMP WITH TIME ZONE,
-			decision VARCHAR(128),
-			policy_used VARCHAR(128),
-			reason TEXT,
-			operator_version VARCHAR(64),
-			recovery_plan_json TEXT
-		);`,
-		`CREATE TABLE IF NOT EXISTS knowledge_base (
-			service VARCHAR(128),
-			failure_pattern VARCHAR(128),
-			action_taken VARCHAR(128),
-			outcome VARCHAR(64)
-		);`,
-	}
-
-	for _, query := range queries {
-		if _, err := s.db.Exec(query); err != nil {
-			return fmt.Errorf("failed migration: %w", err)
-		}
-	}
-	return nil
-}
+// migrate is implemented in migrations.go — a versioned, forward-only
+// migration runner with a startup compatibility guard, replacing the fixed
+// CREATE TABLE IF NOT EXISTS list this used to run unconditionally.
 
 func (s *PostgresIncidentStore) Get(ctx context.Context, id string) (*models.Incident, error) {
 	s.mu.RLock()

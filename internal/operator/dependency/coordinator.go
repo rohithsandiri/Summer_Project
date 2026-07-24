@@ -38,21 +38,40 @@ type HelmOps interface {
 	Rollback(namespace, name string, targetRevision int) error
 }
 
+// PodVerifier confirms a service is actually healthy after a rollback. Its
+// method matches verification.VerificationEngine's signature structurally
+// (Go interfaces are satisfied implicitly), so the operator's real
+// K8sVerificationEngine can be handed to the coordinator with no import
+// coupling between the two packages, and fakes are trivial in tests.
+type PodVerifier interface {
+	Verify(ctx context.Context, service string, namespace string, traceID string) (bool, error)
+}
+
 // PeerResult records the outcome for one candidate peer service.
 type PeerResult struct {
-	Service    string
+	Service string
+	// RolledBack reports whether a Helm rollback call was issued and
+	// returned success. It does NOT by itself mean the peer came back
+	// healthy — check Verified for that.
 	RolledBack bool
-	TargetRev  int
-	Reason     string
+	// Verified reports whether the peer was confirmed healthy after the
+	// rollback. Always true when RolledBack is false (nothing to verify)
+	// and always true when no verifier is configured, preserving the
+	// coordinator's original pod-health-blind behavior.
+	Verified  bool
+	TargetRev int
+	Reason    string
 }
 
 type Coordinator struct {
-	graph       DependencyGraph
-	helm        HelmOps
-	gate        interfaces.CooldownManager
-	log         *logger.Logger
-	batchWindow time.Duration
-	gateWindow  time.Duration
+	graph         DependencyGraph
+	helm          HelmOps
+	gate          interfaces.CooldownManager
+	log           *logger.Logger
+	batchWindow   time.Duration
+	gateWindow    time.Duration
+	verifier      PodVerifier
+	verifyTimeout time.Duration
 }
 
 func NewCoordinator(
@@ -77,6 +96,22 @@ func NewCoordinator(
 		batchWindow: batchWindow,
 		gateWindow:  gateWindow,
 	}
+}
+
+// WithVerifier enables post-rollback health verification for batch peers,
+// extending to peers the same "reported success must be verified" discipline
+// the primary alert-driven rollback already follows (verification.SLOVerifier,
+// added after the live-failure suite found rollbacks were reporting success
+// while still serving faults — F1/§6.4). Without it, a peer rollback is
+// reported RolledBack the instant the Helm SDK call returns, even if the
+// target revision never comes up healthy.
+func (c *Coordinator) WithVerifier(v PodVerifier, timeout time.Duration) *Coordinator {
+	c.verifier = v
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	c.verifyTimeout = timeout
+	return c
 }
 
 // RollbackBatchPeers rolls back services tightly coupled to failedService that
@@ -144,16 +179,23 @@ func (c *Coordinator) considerPeer(ctx context.Context, peer, namespace string, 
 		return PeerResult{Service: peer, Reason: fmt.Sprintf("deployed %s from batch anchor (window %s) — not co-released", gap.Round(time.Second), c.batchWindow)}
 	}
 
+	// Resolve the rollback target BEFORE claiming the execution gate. The
+	// gate is a shared resource with the alert-driven pipeline (utils.
+	// CooldownManager.TryStartExecution) — claiming it here and then bailing
+	// out below (no healthy target found) would burn the peer's execution
+	// slot for a full gateWindow without any rollback ever happening,
+	// incorrectly suppressing a legitimate later recovery for that same
+	// service. Only claim the gate once we're actually about to execute.
+	targetRev, err := c.helm.GetLastHealthyRevision(namespace, peer)
+	if err != nil {
+		return PeerResult{Service: peer, Verified: true, Reason: fmt.Sprintf("no healthy rollback target: %v", err)}
+	}
+
 	// Same gate the alert-driven pipeline uses: if this peer was already
 	// rolled back (own incident, or another batch expansion), skip it.
 	if ok, remaining := c.gate.TryStartExecution(ctx, peer, c.gateWindow); !ok {
 		c.log.Info(ctx, "dependency peer already recovered recently, skipping batch rollback", f, "remaining_window", remaining.String())
-		return PeerResult{Service: peer, Reason: fmt.Sprintf("recovery already ran %s ago", remaining.Round(time.Second))}
-	}
-
-	targetRev, err := c.helm.GetLastHealthyRevision(namespace, peer)
-	if err != nil {
-		return PeerResult{Service: peer, Reason: fmt.Sprintf("no healthy rollback target: %v", err)}
+		return PeerResult{Service: peer, Verified: true, Reason: fmt.Sprintf("recovery already ran %s ago", remaining.Round(time.Second))}
 	}
 
 	c.log.Info(ctx, "rolling back dependency batch peer", f,
@@ -161,10 +203,51 @@ func (c *Coordinator) considerPeer(ctx context.Context, peer, namespace string, 
 
 	if err := c.helm.Rollback(namespace, peer, targetRev); err != nil {
 		c.log.Error(ctx, "dependency batch peer rollback failed", f, "error", err.Error())
-		return PeerResult{Service: peer, Reason: fmt.Sprintf("rollback failed: %v", err)}
+		return PeerResult{Service: peer, Verified: true, Reason: fmt.Sprintf("rollback failed: %v", err)}
 	}
 
-	return PeerResult{Service: peer, RolledBack: true, TargetRev: targetRev, Reason: "co-released within batch window"}
+	verified, reason := c.verifyPeer(ctx, peer, namespace, traceID)
+	if !verified {
+		c.log.Warn(ctx, "dependency batch peer rolled back but did not verify healthy", f,
+			"target_revision", targetRev, "reason", reason)
+		return PeerResult{
+			Service: peer, RolledBack: true, Verified: false, TargetRev: targetRev,
+			Reason: fmt.Sprintf("rolled back to revision %d but did not verify healthy within %s: %s — needs investigation", targetRev, c.verifyTimeout, reason),
+		}
+	}
+
+	return PeerResult{Service: peer, RolledBack: true, Verified: true, TargetRev: targetRev, Reason: "co-released within batch window"}
+}
+
+// verifyPeer polls the configured verifier until it reports healthy or
+// verifyTimeout elapses. With no verifier configured it returns true
+// immediately (pod-health-blind mode, matching pre-verification behavior).
+func (c *Coordinator) verifyPeer(ctx context.Context, peer, namespace, traceID string) (bool, string) {
+	if c.verifier == nil {
+		return true, ""
+	}
+
+	deadline := time.Now().Add(c.verifyTimeout)
+	var lastErr error
+	for {
+		ok, err := c.verifier.Verify(ctx, peer, namespace, traceID)
+		if err != nil {
+			lastErr = err
+		} else if ok {
+			return true, ""
+		}
+		if time.Now().After(deadline) {
+			if lastErr != nil {
+				return false, lastErr.Error()
+			}
+			return false, "pod health check did not pass in time"
+		}
+		select {
+		case <-ctx.Done():
+			return false, "context cancelled"
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 func (c *Coordinator) deployTime(namespace, service string, revision int) (time.Time, error) {
