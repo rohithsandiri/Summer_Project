@@ -188,7 +188,9 @@ func main() {
 	// back tightly-coupled services co-released with the faulty revision so
 	// callers aren't stranded on API contracts the rollback removed.
 	if cfg.DependencyRollbackEnabled {
-		seedGraph := dependency.NewGraph() // hand-declared topology, also the safety-net floor
+		// CI-generated from a static scan of cmd/*/main.go (tools/depscan),
+		// not hand-maintained — see internal/operator/dependency/generated_seed.go.
+		seedGraph := dependency.NewGeneratedSeedGraph()
 
 		var depGraph dependency.DependencyGraph = seedGraph
 		if cfg.JaegerQueryAddr != "" {

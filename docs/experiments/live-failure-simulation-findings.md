@@ -331,6 +331,70 @@ Summary:
 
 ---
 
+## 10. Part 4 — Static Dependency-Graph Seed, Replacing the Hand-Written One (2026-07-25)
+
+§6.7 replaced the *static* seed graph's role as sole source of truth with a
+Jaeger-trace-derived live graph, but the seed itself — the safety-net floor
+that live graph always merges with — was still three hand-typed `AddEdge`
+calls (`dependency.NewGraph()`). That has exactly the maintenance liability
+§6.7 already called out for the pre-Jaeger design: a new caller/callee
+relationship added in code doesn't participate in batch rollback until
+someone remembers to hand-edit the seed and redeploy the operator.
+
+### F12 — The hand-written seed was already wrong  **[FOUND & FIXED]**
+
+Auditing it against the actual code turned up two missing edges immediately:
+the gateway's reverse proxy (`cmd/gateway/main.go`) routes `/api/inventory`
+and `/api/payments` **directly** to inventory-service and payment-service —
+not only through order-service — but the hand-written seed only declared
+`api-gateway -> order-service`. Had inventory-service or payment-service
+failed and rolled back while the gateway was mid-batch-release with either of
+them, the coordinator would not have considered the gateway a peer worth
+checking, because the seed simply didn't say they were connected.
+
+### Fix: statically scan the code instead of hand-declaring the graph
+
+`tools/depscan` (`tools/depscan/depscan/scan.go`) parses every
+`cmd/*/main.go` with `go/ast` and extracts edges from a convention the
+codebase already enforces: `internal/shared/config` requires every service to
+name its dependencies as `<Name>ServiceURL` fields (`InventoryServiceURL`,
+`PaymentServiceURL`, `OrderServiceURL`, validated by `RequireInventoryURL`
+etc.). Scanning for *references to that field*, rather than matching a
+specific call shape, covers both ways this codebase actually uses those URLs
+— `httpclient.New(cfg.InventoryServiceURL, "inventory-service")` in
+order-service, and `handler.RouteConfig{BackendURL: cfg.InventoryServiceURL}`
+in the gateway — without special-casing either. The caller's own name comes
+from its `config.Load("<name>", ...)` call, the same literal already used as
+`cfg.ServiceName`.
+
+The scanner writes `internal/operator/dependency/generated_seed.go`
+(`// Code generated ... DO NOT EDIT`), consumed by the new
+`dependency.NewGeneratedSeedGraph()` — now what `cmd/operator/main.go` wires
+in as the seed, in place of `NewGraph()`. `NewGraph()` itself is untouched
+and still used by `TestDependencyGraphTopology`, which asserts its exact
+3-edge structure as a fixture; it's simply no longer what runs in production.
+
+**Enforcement, not just convenience:** `make depscan-check` (`go run
+./tools/depscan --check`) fails if the committed generated file doesn't match
+a fresh scan, and runs in CI (`.github/workflows/ci.yml`, right after `go
+vet`). Adding a new cross-service call without running `make depscan` now
+fails the build — the exact "new call path silently doesn't participate"
+failure mode is now a loud CI failure instead of a live incident.
+
+**Testing:** 8 unit tests (`tools/depscan/depscan/scan_test.go`) covering both
+call-shape patterns, self-loop rejection, files that don't participate in the
+convention (`cmd/demo`, `cmd/healthcheck`, `cmd/operator` — none call
+`config.Load` with a literal name), multi-word PascalCase-to-kebab-case
+conversion, cross-file deduplication, and deterministic output ordering.
+
+**Relationship to the live Jaeger graph (§6.7):** unchanged in spirit — the
+live graph still merges observed traffic on top of a seed that must never
+silently disappear. The seed itself just went from "manually typed, provably
+already wrong" to "generated from the same source of truth the code runs on,
+CI-enforced to stay current."
+
+---
+
 ## 9. Conclusions
 
 1. **The SLO → Prometheus → Alertmanager → operator → Helm-rollback loop works end-to-end** on a real cluster: every SLO-detected failure was automatically rolled back, with MTTR 137–196 s, dominated ~95 % by detection windows (rule `for:` durations + rate windows + Alertmanager group wait), not by the operator (~1 s decide-and-execute).

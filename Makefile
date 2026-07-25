@@ -1,6 +1,6 @@
 # Makefile for Self-Healing Platform Control Plane Validation & Thesis Benchmarking
 
-.PHONY: all build test demo chaos rollback-demo canary-demo incident-demo load-tests clean
+.PHONY: all build test demo chaos rollback-demo canary-demo incident-demo load-tests clean depscan depscan-check
 
 all: build test
 
@@ -9,6 +9,14 @@ build:
 
 test:
 	go test -v ./...
+
+depscan:
+	@echo "Regenerating internal/operator/dependency/generated_seed.go from cmd/*/main.go ..."
+	go run ./tools/depscan
+
+depscan-check:
+	@echo "Verifying generated_seed.go is up to date with cmd/*/main.go ..."
+	go run ./tools/depscan --check
 
 demo:
 	go run cmd/demo/main.go

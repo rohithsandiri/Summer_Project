@@ -44,6 +44,25 @@ func NewEmptyGraph() *Graph {
 	}
 }
 
+// NewGeneratedSeedGraph builds a Graph from GeneratedSeedEdges
+// (generated_seed.go, produced by tools/depscan statically scanning
+// cmd/*/main.go for `<Name>ServiceURL` config-field references). This is
+// what production wiring (cmd/operator/main.go) uses as the safety-net floor
+// for JaegerDependencyGraph, in place of the hand-maintained NewGraph():
+// a new caller/callee relationship added in code is picked up the next time
+// `make depscan` runs (enforced by a CI drift check), instead of silently
+// not participating in batch rollback until someone remembers to hand-edit
+// the seed. NewGraph() is kept as-is — a fixed, deliberately-scoped fixture
+// several tests assert exact structure against — and is not used in
+// production anymore.
+func NewGeneratedSeedGraph() *Graph {
+	g := NewEmptyGraph()
+	for _, e := range GeneratedSeedEdges {
+		g.AddEdge(e[0], e[1])
+	}
+	return g
+}
+
 // Edges returns every (parent, child) pair currently in the graph. Order is
 // unspecified. Used for merging and diffing graph snapshots.
 func (g *Graph) Edges() [][2]string {

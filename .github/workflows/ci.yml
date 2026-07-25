@@ -43,6 +43,9 @@ jobs:
       - name: Go Vet
         run: go vet ./...
 
+      - name: Verify dependency graph seed is up to date
+        run: go run ./tools/depscan --check
+
       - name: Install Govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
 

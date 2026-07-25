@@ -1,0 +1,174 @@
+// tools/depscan/scan.go
+//
+// Static extraction of the service dependency graph from source code,
+// instead of hand-maintaining it or waiting for live traffic to reveal it.
+//
+// Convention this relies on: internal/shared/config already enforces that
+// every service names its downstream dependencies as `<Name>ServiceURL`
+// config fields (InventoryServiceURL, PaymentServiceURL, OrderServiceURL —
+// see internal/shared/config/config.go and every cmd/*/main.go's
+// RequireXURL validation). That field name IS the declared cross-service
+// call: whichever cmd/*/main.go references cfg.InventoryServiceURL is,
+// by construction, a caller of inventory-service. This holds for both call
+// shapes actually used in this codebase — httpclient.New(cfg.XServiceURL,
+// "x-service") in order-service, and handler.RouteConfig{BackendURL:
+// cfg.XServiceURL} in the gateway — because both go through the same named
+// config field, so scanning for the field reference (not the specific call
+// shape wrapping it) covers both without special-casing either.
+//
+// Each service's logical name (the "caller") comes from its own
+// config.Load("<name>", ...) call — the same literal already used as
+// cfg.ServiceName in logs and metrics.
+package depscan
+
+import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// Edge is one statically-discovered caller -> callee relationship.
+type Edge struct {
+	Caller string
+	Callee string
+}
+
+var serviceURLField = regexp.MustCompile(`^([A-Z][A-Za-z0-9]*)ServiceURL$`)
+
+// ScanFile extracts the dependency edges declared in a single cmd/*/main.go.
+// caller is "" (with a nil error) if the file has no config.Load("<name>", ...)
+// call with a string-literal first argument — that's not an error, it just
+// means this file doesn't participate in the convention (e.g. cmd/demo,
+// cmd/healthcheck, and cmd/operator, which loads its own config differently).
+func ScanFile(filename string, src []byte) (caller string, edges []Edge, err error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filename, src, 0)
+	if err != nil {
+		return "", nil, fmt.Errorf("parse %s: %w", filename, err)
+	}
+
+	callees := make(map[string]bool)
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			if sel, ok := node.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Load" {
+				if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "config" && len(node.Args) > 0 {
+					if lit, ok := node.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+						if name, err := strconv.Unquote(lit.Value); err == nil {
+							caller = name
+						}
+					}
+				}
+			}
+		case *ast.SelectorExpr:
+			if m := serviceURLField.FindStringSubmatch(node.Sel.Name); m != nil {
+				callees[kebabFromPascal(m[1])+"-service"] = true
+			}
+		}
+		return true
+	})
+
+	if caller == "" {
+		return "", nil, nil
+	}
+
+	for callee := range callees {
+		if callee == caller {
+			continue // a service referencing its own name is not a real edge
+		}
+		edges = append(edges, Edge{Caller: caller, Callee: callee})
+	}
+	sortEdges(edges)
+	return caller, edges, nil
+}
+
+// kebabFromPascal converts a PascalCase identifier fragment ("Order",
+// "OrderProcessing") to kebab-case ("order", "order-processing"), so the
+// scanner isn't limited to today's single-word service names.
+func kebabFromPascal(s string) string {
+	var b strings.Builder
+	runes := []rune(s)
+	for i, r := range runes {
+		if i > 0 && isUpper(r) && !isUpper(runes[i-1]) {
+			b.WriteByte('-')
+		}
+		b.WriteRune(toLower(r))
+	}
+	return b.String()
+}
+
+func isUpper(r rune) bool { return r >= 'A' && r <= 'Z' }
+func toLower(r rune) rune {
+	if isUpper(r) {
+		return r + ('a' - 'A')
+	}
+	return r
+}
+
+// ScanRoot scans every cmd/*/main.go under root and returns the deduplicated,
+// deterministically sorted union of every file's edges.
+func ScanRoot(root string) ([]Edge, error) {
+	matches, err := filepath.Glob(filepath.Join(root, "cmd", "*", "main.go"))
+	if err != nil {
+		return nil, fmt.Errorf("glob cmd/*/main.go: %w", err)
+	}
+	sort.Strings(matches)
+
+	seen := make(map[Edge]bool)
+	var edges []Edge
+	for _, path := range matches {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", path, err)
+		}
+		_, fileEdges, err := ScanFile(path, src)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range fileEdges {
+			if !seen[e] {
+				seen[e] = true
+				edges = append(edges, e)
+			}
+		}
+	}
+	sortEdges(edges)
+	return edges, nil
+}
+
+func sortEdges(edges []Edge) {
+	sort.Slice(edges, func(i, j int) bool {
+		if edges[i].Caller != edges[j].Caller {
+			return edges[i].Caller < edges[j].Caller
+		}
+		return edges[i].Callee < edges[j].Callee
+	})
+}
+
+// Generate renders edges as the generated_seed.go source this tool maintains.
+func Generate(edges []Edge) []byte {
+	var b strings.Builder
+	b.WriteString("// Code generated by tools/depscan from cmd/*/main.go; DO NOT EDIT.\n")
+	b.WriteString("//\n")
+	b.WriteString("// Regenerate with `make depscan` after adding or changing a cross-service\n")
+	b.WriteString("// call (i.e. a new `<Name>ServiceURL` config field reference). CI verifies\n")
+	b.WriteString("// this file is up to date with `make depscan-check` — see .github/workflows/ci.yml.\n\n")
+	b.WriteString("package dependency\n\n")
+	b.WriteString("// GeneratedSeedEdges are caller->callee service relationships discovered by\n")
+	b.WriteString("// statically scanning cmd/*/main.go for `<Name>ServiceURL` config-field\n")
+	b.WriteString("// references, rather than hand-maintained. See tools/depscan/scan.go.\n")
+	b.WriteString("var GeneratedSeedEdges = [][2]string{\n")
+	for _, e := range edges {
+		fmt.Fprintf(&b, "\t{%q, %q},\n", e.Caller, e.Callee)
+	}
+	b.WriteString("}\n")
+	return []byte(b.String())
+}
