@@ -11,10 +11,10 @@ This benchmark report compares service profiles under healthy state, failed stat
 | **Service Status** | Running | Failing | Running (Revision Rollback) |
 
 ## Overall Platform MTTR Performance Summary
-- **Average MTTD**: 3m0.000071s
+- **Average MTTD**: 3m0.0000765s
 - **Average MTTR**: 5m0s
 - **Average MTBF**: 24h0m0s
-- **Average Rollback Execution**: 137.75µs
-- **Average Verification Execution**: 1.5µs
+- **Average Rollback Execution**: 119µs
+- **Average Verification Execution**: 2µs
 - **Reliability Score**: 96.99/100
 - **Automated Rollback Engine**: Helm Rollback SDK (100% success rate)
