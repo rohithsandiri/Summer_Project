@@ -1,0 +1,40 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Gap Closure Checklist</title>
+<style>
+body { font-family: Georgia, 'Times New Roman', serif; line-height: 1.4; max-width: 880px; margin: 40px auto; color: #111; }
+h1 { font-size: 18px; }
+h2 { font-size: 14px; margin-top: 22px; }
+table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 12px; }
+th, td { border: 1px solid #888; padding: 5px 7px; text-align: left; vertical-align: top; }
+th { background: #eee; }
+.major { color: #a10000; font-weight: bold; }
+.minor { color: #a15b00; font-weight: bold; }
+</style>
+</head>
+<body>
+<h1>Gap Closure Checklist — SelfHealing_Gap_Analysis.docx applied to this project's draft</h1>
+<p>This maps every gap raised in the professor's reviewer-style gap analysis (written against your friend's simpler single-service report) to how the equivalent concern is handled in <b>SelfHealing_BatchRollback_Paper_Draft.docx</b> — our project's paper, not a copy of theirs. Our system and dataset differ, so some gaps are closed the same way; a few (statistical power) are closed by being honest about scope rather than by claiming rigor we don't have data for yet.</p>
+
+<table>
+<tr><th>Gap</th><th>Reviewer's concern</th><th>How this draft handles it</th></tr>
+<tr><td class="major">G1 — Genre/structure</td><td>Field notes, not a paper; no explicit RQs or contributions.</td><td>Full IEEE structure used throughout: Abstract → Intro (with 4 explicit RQs and 6 enumerated contributions) → Background → Related Work → System Design → Methodology → Evaluation → Threats to Validity → Discussion → Conclusion.</td></tr>
+<tr><td class="major">G2 — No related work</td><td>Zero citations; desk-reject risk.</td><td>20 real, verified citations across autonomic computing, the operator pattern, SRE/chaos engineering, observability/microservices, trace-based dependency-graph construction (Microscope, MicroHECL, Hubble — this project's own differentiator), database schema evolution, and a 2024 LLM auto-remediation paper. Every citation was checked against a real source before inclusion, not carried over from the friend's paper.</td></tr>
+<tr><td class="major">G3 — Statistical power</td><td>n=3–4 reps, spread ~3x the effect size; headline claim underpowered.</td><td><b>Not claimed to be solved — deliberately scoped down instead.</b> Our own MTTR data is n=1–2 per scenario (even thinner than theirs). Section V-D states this explicitly as "not a statistically supported effect-size claim" and every MTTR number in the Evaluation is framed as mechanism evidence, not a measured effect. This is the same discipline the reviewer praised in the original ("bias against your own thesis"), applied honestly to weaker data rather than overstated. A concrete replication plan (≥ reps, bootstrap CIs, Mann–Whitney U, MTTR decomposition) is stated as required future work, not implied to already exist.</td></tr>
+<tr><td class="major">G4 — External validity / no Threats section</td><td>Single cluster, trivial app, ungrounded human baseline, no Threats-to-Validity section.</td><td>Full Threats to Validity section (construct / internal / external / statistical-conclusion), each with specifics from this project — e.g. the timestamp-based batch-membership proxy as a construct-validity threat, the F12 data race as a retrospective internal-validity caveat on earlier "flaky test" claims. (No human-baseline claim exists in this draft to ground, since this paper doesn't run a human-vs-automation comparison — see note below.)</td></tr>
+<tr><td class="minor">G5 — Incomplete fault coverage</td><td>memleak fault has no detector; specified but not implemented.</td><td>This project has no memleak-equivalent gap, but has its own honestly-scoped equivalent open items, stated as such rather than hidden: F5 (suppressed-recovery exposure), the newly found double-rollback edge case in target selection, sequential (non-parallel) peer verification, and in-memory-only trace storage — all listed with concrete fixes in Section VIII, not hand-waved.</td></tr>
+<tr><td class="minor">G6 — Metric definitions / reproducibility</td><td>MTTR never formally defined; versions not pinned; no artifact statement.</td><td>Section V-B gives a precise MTTR definition (t0/t1, dual verification criterion). Section V-C pins every component version actually in use (Go 1.25.0, Helm SDK v3.14.2, K8s v1.35.1, Jaeger, Redis) — and honestly flags one inconsistency found while compiling that list (Jaeger 1.60 vs 1.50 across two manifests) rather than silently fixing it and pretending it was never wrong. An Artifact Availability section gives the public repo URL.</td></tr>
+</table>
+
+<h2>One structural difference worth flagging before submission</h2>
+<p>The reviewed report's central empirical claim was a human-vs-automation MTTR comparison. This project's paper does not attempt that comparison — it was never built to run one (there is no scripted human-baseline harness in this codebase). Instead, this draft's central claim is systems-oriented: dependency-aware batch rollback, two-signal verification applied uniformly across primary and peer rollbacks, and rollback-safety for the healer's own state — with MTTR reported only as illustrative, mechanism-level supporting evidence, not the headline result. This was a deliberate choice to avoid overclaiming with n=1–2 data rather than an oversight; you may want to discuss with B. Thangaraju whether the systems contribution alone is the right headline, or whether a human-baseline harness should be added before submission to make the paper more directly comparable to the reviewed genre.</p>
+
+<h2>Files</h2>
+<ul>
+<li><b>SelfHealing_BatchRollback_Paper_Draft.docx</b> — the paper itself, ready for review.</li>
+<li>Source (version-controlled): <code>docs/publication/ieee-paper-draft.html</code> in the project repository.</li>
+</ul>
+</body>
+</html>
