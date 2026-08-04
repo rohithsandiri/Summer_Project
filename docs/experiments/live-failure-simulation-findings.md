@@ -246,7 +246,7 @@ The dependency graph used for batch rollback (§6.3) was originally hand-written
 
 ## 6.8 Pre-existing issue discovered (not fixed, flagged)
 
-Running the full suite with `-race` (previously only run selectively on individual packages) surfaced a **pre-existing data race** in `internal/operator/incident/manager.go`, unrelated to any change in this document: `ProcessAlert` dispatches `go mgr.runRecoveryPipeline(ctx, incident, ...)` and then continues mutating the same `*models.Incident` pointer (`incident.DecisionHistory`, `incident.LastUpdate`) in the calling goroutine while the dispatched goroutine concurrently calls `stateMachine.Transition`, which also writes incident fields. Under concurrent alerts this is undefined behavior — not silently benign — and could corrupt incident state. Not fixed here (out of scope for this session's ask); worth a follow-up: either snapshot/copy the incident before dispatch, or guard the `Incident` struct's mutable fields with a mutex.
+Running the full suite with `-race` (previously only run selectively on individual packages) surfaced a **pre-existing data race** in `internal/operator/incident/manager.go`, unrelated to any change in this document: `ProcessAlert` dispatches `go mgr.runRecoveryPipeline(ctx, incident, ...)` and then continues mutating the same `*models.Incident` pointer (`incident.DecisionHistory`, `incident.LastUpdate`) in the calling goroutine while the dispatched goroutine concurrently calls `stateMachine.Transition`, which also writes incident fields. Under concurrent alerts this is undefined behavior — not silently benign — and could corrupt incident state. **Fixed in §11 (Part 5)** by reordering `ProcessAlert` so it finishes all synchronous work on the incident before dispatching the background goroutine, rather than adding a mutex.
 
 ## 8. Part 3 — Dependency Batch-Rollback Hardening & Database Rollback Safety (2026-07-25)
 
@@ -392,6 +392,34 @@ live graph still merges observed traffic on top of a seed that must never
 silently disappear. The seed itself just went from "manually typed, provably
 already wrong" to "generated from the same source of truth the code runs on,
 CI-enforced to stay current."
+
+---
+
+## 11. Part 5 — Fixing the Data Race Flagged in §6.8 (2026-08-05)
+
+§6.8 flagged, but did not fix, a data race in `internal/operator/incident/manager.go`: `ProcessAlert` dispatches `go mgr.runRecoveryPipeline(...)` and then kept mutating the same `*models.Incident` (`DecisionHistory`, `LastUpdate`) and calling `mgr.store.Update(ctx, incident)` on the calling goroutine, while the dispatched goroutine concurrently wrote incident fields via `stateMachine.Transition`.
+
+**It turns out this was also the root cause of "flaky" `TestAutomatedChaosScenarios` / `TestIncidentManagerOrchestration`.** Both were reported as intermittently failing only when the full suite ran in parallel. Reproducing under `go test -race` (matching what CI actually runs) showed the *real* signal: both failed consistently (3/3) under `-race`, and `go test -race -v` printed the exact race —
+
+```
+WARNING: DATA RACE
+Write at 0x00c00012e250 by goroutine 53:
+  state.(*StateMachine).Transition()
+  executor.(*HelmRollbackExecutor).Execute()
+  incident.(*Manager).runRecoveryPipeline()
+  incident.(*Manager).ProcessAlert.gowrap1()
+
+Previous read at 0x00c00012e250 by goroutine 19:
+  storage.(*InMemoryIncidentStore).cloneIncident()
+  storage.(*InMemoryIncidentStore).Update()
+  incident.(*Manager).ProcessAlert()
+```
+
+— i.e. exactly the race §6.8 described. "Flaky under the full suite" wasn't unrelated timing noise; it was this race being caught (or not, depending on scheduling) by the race detector. Without `-race` the corruption is silent, which is why it never showed up as a functional test failure, only as a race-detector one.
+
+**Fix:** reordered `ProcessAlert` instead of adding a mutex to `models.Incident`. The function now finishes *all* of its own synchronous work on `incident` — recording the decision, running the plan!=nil/plan==nil state transition, `store.Update`, `history.Record` — and only *then* dispatches `runRecoveryPipeline`, which becomes the incident's sole owner from that point on. Previously the dispatch happened in the middle of that sequence, so the two goroutines' writes (and the main goroutine's `store.Update`) could interleave or clobber each other independent of the raw data race. No behavior changes on the `plan == nil` path; on the `plan != nil` path, the recovery pipeline now starts a few synchronous statements later — immaterial given the pipeline's own work (Helm rollback, verification polling) is orders of magnitude slower.
+
+**Verification:** `go test ./... -race -count=1` run 5x consecutively, 0 failures (previously 3/3 runs failed on the same two tests before the fix). Full suite (`go vet`, `gofmt`, `make depscan-check`, `go test -race ./...`) clean.
 
 ---
 

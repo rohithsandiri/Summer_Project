@@ -231,31 +231,40 @@ func (mgr *Manager) ProcessAlert(ctx context.Context, alert *models.Alert, trace
 		if err != nil {
 			return fmt.Errorf("recovery planner error: %w", err)
 		}
-
-		if plan != nil {
-			incident.RecoveryAttempts++
-			// Record cooldown window
-			mgr.cooldown.RecordRecovery(ctx, alert.Service, alert.Name, plan.Cooldown)
-			if mgr.timeline != nil {
-				_ = mgr.timeline.Record(ctx, incident.ID, fmt.Sprintf("Recovery Plan Created: ID=%s, Action=%s, Cooldown=%s", plan.ID, plan.DesiredAction, plan.Cooldown.String()))
-			}
-
-			// Transition state to RecoveryPlanned
-			if err := mgr.stateMachine.Transition(ctx, incident, models.StateRecoveryPlanned, fmt.Sprintf("Recovery plan created: %s", plan.ID)); err != nil {
-				return err
-			}
-
-			// Trigger recovery execution plane in a separate background context
-			go mgr.runRecoveryPipeline(context.Background(), incident, plan, policy, traceID)
-		}
 	}
 
-	// 8. Record Decision and Update Incident
+	// 8. Record Decision and Update Incident.
+	//
+	// Everything below that touches `incident` — including this block, the
+	// plan!=nil/plan==nil state transitions, and the store.Update/history.Record
+	// calls — MUST run before runRecoveryPipeline is dispatched (see the very
+	// end of this function). Once that goroutine starts, it owns `incident`
+	// exclusively: it runs for the full rollback+verify+dependency-batch
+	// lifecycle and persists its own state transitions independently. Doing
+	// any of this after dispatch — which is where it used to live — raced the
+	// dispatched goroutine's writes (via stateMachine.Transition) against this
+	// goroutine's reads/writes of the same *models.Incident, confirmed by `go
+	// test -race` (WARNING: DATA RACE between state.Transition and
+	// storage.cloneIncident on incident.CurrentState/History). It also meant
+	// whichever goroutine's store.Update ran last could silently clobber the
+	// other's changes, independent of the raw race.
 	incident.DecisionHistory = append(incident.DecisionHistory, *decision)
 	incident.LastUpdate = time.Now().UTC()
 
-	// If no action is taken, transition directly to Waiting or Failed
-	if plan == nil {
+	if plan != nil {
+		incident.RecoveryAttempts++
+		// Record cooldown window
+		mgr.cooldown.RecordRecovery(ctx, alert.Service, alert.Name, plan.Cooldown)
+		if mgr.timeline != nil {
+			_ = mgr.timeline.Record(ctx, incident.ID, fmt.Sprintf("Recovery Plan Created: ID=%s, Action=%s, Cooldown=%s", plan.ID, plan.DesiredAction, plan.Cooldown.String()))
+		}
+
+		// Transition state to RecoveryPlanned
+		if err := mgr.stateMachine.Transition(ctx, incident, models.StateRecoveryPlanned, fmt.Sprintf("Recovery plan created: %s", plan.ID)); err != nil {
+			return err
+		}
+	} else {
+		// If no action is taken, transition directly to Waiting or Failed
 		if decision.Decision != models.ActionEscalate && decision.Decision != models.ActionIgnore {
 			if err := mgr.stateMachine.Transition(ctx, incident, models.StateWaiting, "Waiting for recovery execution context"); err != nil {
 				return err
@@ -275,6 +284,13 @@ func (mgr *Manager) ProcessAlert(ctx context.Context, alert *models.Alert, trace
 	// Persist decision history entry
 	if err := mgr.history.Record(ctx, decision, incident.ID); err != nil {
 		mgr.log.Error(ctx, "failed to record decision history", f)
+	}
+
+	// Trigger recovery execution plane in a separate background context. This
+	// must be the LAST thing ProcessAlert does with `incident` — see the note
+	// above step 8.
+	if plan != nil {
+		go mgr.runRecoveryPipeline(context.Background(), incident, plan, policy, traceID)
 	}
 
 	return nil
