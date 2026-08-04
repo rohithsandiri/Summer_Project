@@ -1,0 +1,237 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\newcommand{\fixed}{\textcolor{green!45!black}{\textbf{Fixed}}}
+\newcommand{\open}{\textcolor{orange!70!black}{\textbf{Open}}}
+
+\begin{document}
+
+\title{Self-Healing Beyond a Single Service: An Honest MTTR Benchmark with Dependency-Aware Batch Rollback for Kubernetes}
+
+\author{
+\IEEEauthorblockN{[First Author]\IEEEauthorrefmark{1}, B. Thangaraju\IEEEauthorrefmark{2}}
+\IEEEauthorblockA{\IEEEauthorrefmark{1}Roll No. [fill], \IEEEauthorrefmark{2}Project Guide \\
+International Institute of Information Technology Bangalore, India \\
+{[fill author contact e-mail(s)]}}
+}
+
+\maketitle
+
+\begin{abstract}
+Self-healing Kubernetes systems that automatically roll back a broken Helm release on an SLO-alert breach are usually benchmarked, when they are benchmarked at all, as a single-service decision: one alert, one release, one rollback. We build such a system for a three-service platform and evaluate it with a two-arm methodology --- automated recovery versus a deliberately generous simulated human baseline --- across four fault modes, following the same discipline used in prior single-service work: an honest, disaggregated comparison rather than a uniform capability claim. At the time of writing, the benchmark harness and statistical-analysis tooling are complete and verified, but no manual-arm repetitions have been executed, since no live cluster was available during this development session; we report this directly rather than fabricate or infer human-baseline numbers, and present the automated-arm pilot data (n=1--2 per scenario) that does exist as illustrative of mechanism only. Because our target system has three interdependent services rather than one, we extend the single-service rollback model with a dependency-aware batch-rollback coordinator: when a co-released dependent service is left calling a contract a rollback just removed, the coordinator rolls it back too, gated by an atomic per-service execution lock that we show is necessary to avoid cross-service oscillation. We further apply SLO-aware, two-signal verification (pod health \emph{and} confirmation that the triggering alert has cleared) uniformly to both the primary rollback and every batch peer, and extend rollback-safety discipline to the healer's own persistent state via versioned database migrations and a startup compatibility guard. Iterative live fault injection, static analysis, and Go's race detector together surfaced twelve cross-layer defects (F1--F12), including one --- a double-rollback edge case in target selection --- reported here for the first time. We close with a concrete, immediately executable plan to complete the human-baseline arm and the statistical analysis this paper's own methodology specifies.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Self-healing systems, Kubernetes, mean time to recovery, automated rollback, dependency-aware remediation, site reliability engineering, Helm, Prometheus, autonomic computing.
+\end{IEEEkeywords}
+
+\section{Introduction}
+Automated remediation --- infrastructure that detects a fault and repairs it without a human --- is a long-standing goal of autonomic computing \cite{kephart2003vision,ibm2006blueprint} and a common feature of Kubernetes operators \cite{burns2016borg,dobies2020operators}. A frequently deployed instance watches Prometheus SLO alerts \cite{brazil2018prometheus} and, on a breach, rolls a Helm release back to a prior revision. The central empirical question this pattern raises --- does automating the rollback actually reduce recovery time, and under what conditions --- is rarely tested against a fair human baseline and almost never disaggregated by failure mode.
+
+This paper answers that question for a concrete, multi-service system, and does so honestly: we report what we can currently support with data and what we cannot, rather than letting an incomplete study read as a finished benchmark. We additionally identify and close a gap in the single-service framing itself: production microservice systems are deployed in batches, not one service at a time, and a rollback scoped to only the alerting service can leave its co-released dependents calling a contract that rollback just removed.
+
+\subsection{Research Questions}
+\textbf{RQ1:} Does alert-driven automated rollback reduce MTTR relative to a best-case simulated human operator, and by how much? \textbf{RQ2:} Does any benefit depend on the failure mode and its detection latency? \textbf{RQ3:} For which failure classes does automation provide no measurable MTTR benefit, and why? \textbf{RQ4 (addon scope):} When a failing service was released together with dependent peers, does scoping rollback to only the alerting service strand those peers on a removed contract, and can dependency-aware batch rollback close that gap without reintroducing the oscillation that motivates per-service cooldowns in the first place?
+
+\subsection{Contributions}
+(1) A reproducible, two-arm (simulated-human vs.\ automated) MTTR benchmark harness for a multi-service Kubernetes system, extending the single-service benchmark methodology used in prior work to a system with real inter-service dependencies, including a sampled (not fixed-point) human reaction-time model and full statistical-analysis tooling (bootstrap confidence intervals, Mann--Whitney U with tie correction, Bonferroni-corrected significance across scenarios). (2) An honestly-scoped pilot dataset on the automated arm only (n=1--2 per scenario, human arm not yet run) that reproduces the detection-latency-dominated MTTR pattern reported for single-service systems, explicitly not claimed as statistically powered. (3) A dependency-aware batch-rollback coordinator --- this paper's addon contribution beyond the single-service model --- built on a self-maintaining dependency graph that merges statically-scanned source code with live trace-derived edges, gated by an atomic per-service execution lock. (4) SLO-aware, two-signal verification applied uniformly to the primary rollback and every batch peer. (5) Rollback-safety discipline for the healer's own persistent state via versioned, forward-only database migrations and a startup compatibility guard. (6) A twelve-defect catalogue (F1--F12) spanning Prometheus query semantics, Helm history ordering, Alertmanager label precedence, and concurrency, including a newly identified double-rollback edge case.
+
+\section{Background and System Model}
+The system is a MAPE-K instance \cite{kephart2003vision,ibm2006blueprint}. \textbf{Monitor}: Prometheus scrapes the API gateway and three business microservices (order, inventory, payment) every 15\,s. \textbf{Analyze}: PrometheusRule expressions evaluate error-rate, latency, zero-healthy-pod, and stuck-rollout conditions per service, each with an explicit \texttt{for:} duration. \textbf{Plan}: a policy engine matches the firing alert to a cooldown-gated recovery policy; a decision engine scores a recovery plan against SLO, burn-rate, and root-cause signals. \textbf{Execute}: a Helm Go SDK executor performs the rollback, followed --- this paper's addon extension --- by a dependency-aware batch-rollback coordinator (Section~\ref{sec:design}). \textbf{Knowledge}: policy configuration, the dependency graph, and a Postgres-backed incident/decision/rollback audit trail persist across restarts.
+
+The action path is Alertmanager-webhook-triggered, not reconcile-loop-polled: Prometheus already evaluates every SLO expression on its own schedule, so a second, independently-timed poll would duplicate that evaluation and add its own interval to every incident's MTTR. Alertmanager's own grouping latency (10\,s \texttt{group\_wait} on the critical route) is the only added delay between detection and the operator receiving the event.
+
+\section{Related Work}
+\textbf{Autonomic and self-healing systems.} The vision of self-configuring, self-healing systems was articulated by Kephart and Chess \cite{kephart2003vision} and formalized as the MAPE-K loop \cite{ibm2006blueprint}; Psaier and Dustdar \cite{psaier2011survey} survey the resulting body of work. Most such systems, and the operator pattern that implements many of them on Kubernetes \cite{burns2016borg,dobies2020operators}, reconcile one resource at a time; the batch-scoping problem this paper addresses (Section~\ref{sec:design}) is comparatively unexplored.
+
+\textbf{Reliability engineering and resilience testing.} Google's SRE practice \cite{beyer2016sre} contributes the golden-signal alerting and error-budget framing this system adopts; MTTR is one of the four DORA delivery-performance metrics \cite{forsgren2018accelerate}. Chaos engineering \cite{basiri2016chaos} injects faults to expose weaknesses; we inject faults for a related but distinct purpose: verifying a remediation pipeline's own correctness under sustained, adversarial, live alert traffic.
+
+\textbf{Observability, microservices, and delivery.} The evaluation rests on Prometheus-based monitoring \cite{brazil2018prometheus} and observability practice \cite{sridharan2018observability} over a microservice architecture \cite{dragoni2017microservices,newman2021microservices} delivered through continuous delivery \cite{humble2010continuous}.
+
+\textbf{Trace-based dependency-graph construction.} Production root-cause-analysis systems build the service call graph dynamically from observed traffic: Microscope \cite{lin2018microscope} and MicroHECL \cite{liu2021microhecl}, the latter deployed at Alibaba, construct a live causal graph from traces each analysis cycle. Cilium Hubble \cite{cilium2024hubble} builds an equivalent service map at the kernel level via eBPF, with no application-level instrumentation. We adopt the trace-based technique for a different purpose than root-cause ranking: scoping which services a rollback should also touch, not which service caused the incident.
+
+\textbf{Database schema evolution.} The expand/contract discipline applied to the healer's own audit-trail schema (Section~\ref{sec:design}) follows established evolutionary-database-design practice \cite{sadalage2006refactoring}; we are not aware of this discipline being applied specifically to a self-healing system's own persistent state, as distinct from the state of the services it heals.
+
+\textbf{ML/LLM-based auto-remediation.} Recent work applies large language models to remediation itself, for example generating and executing Ansible playbooks in response to microservice anomalies \cite{sarda2024llm}. That line emphasizes remediation capability; correctly scoping which resources any remediation action should touch, and verifying its result against the actual violated signal, is orthogonal and, we argue, a prerequisite regardless of how the remediation action itself is generated.
+
+\textbf{Empirical studies of cross-layer failures.} Gunawi et al.\ \cite{gunawi2014bugs} show cloud-system failures concentrate in the interactions between components rather than within them. Every defect in our own catalogue (Section~\ref{sec:defects}) lived at exactly such a seam --- Prometheus query semantics against Kubernetes backoff behavior, Helm's history ordering against Go's sort semantics, Alertmanager's label precedence, and Go's goroutine model against a shared incident record --- extending that finding to the remediation-automation layer.
+
+\section{System Design}
+\label{sec:design}
+
+\subsection{Self-Maintaining Dependency Graph}
+Batch-rollback scoping requires a ``who calls whom'' graph. A hand-maintained edge list is a standing liability: a new call path silently does not participate in batch rollback until someone edits the graph and redeploys the operator. Auditing our own hand-written seed against the codebase found it already stale --- the API gateway proxies directly to all three backend services, but the seed only declared a gateway$\rightarrow$order-service edge, omitting two live call paths.
+
+We replaced the hand-written seed with one generated by a static scanner that parses every service entry point with Go's own AST tooling and extracts an edge wherever code references a \texttt{<Name>ServiceURL} configuration field --- a naming convention the codebase's configuration package already enforces for every cross-service dependency, covering both call shapes in use (direct HTTP client construction and reverse-proxy route tables) since both reference the same named field. The generated seed is verified in CI: a build fails if the committed seed differs from a fresh scan. This generated seed forms the floor of a live graph that polls Jaeger's dependency-aggregation API and merges observed edges on top of it, never replacing the seed outright, so a known relationship cannot vanish merely because traffic was briefly quiet during an active incident.
+
+\subsection{Dependency-Aware Batch-Rollback Coordinator}
+After a primary rollback succeeds, the coordinator consults the dependency graph for the failed service's direct callers and callees (transitive closure is deliberately excluded, since coupling weakens with distance) and rolls back any peer whose current revision was deployed within a configurable batch window of the primary's faulty revision --- the operational signature of ``released together.'' Each peer rollback claims the same atomic per-service execution gate used by alert-driven recoveries, so a peer already rolled back by its own incident is skipped and batch expansion never recurses.
+
+Reviewing this coordinator for this paper surfaced two defects, both newly fixed here. First, the execution gate was claimed \emph{before} confirming a healthy rollback target existed; if none was found, the peer's execution slot was consumed anyway for a full cooldown window, wrongly suppressing that service's own next legitimate recovery even though no rollback had been attempted. The fix reorders target resolution before gate acquisition. Second, a peer rollback was reported successful the instant the Helm SDK call returned, with no health check --- the same false-success mode already known for primary rollbacks (Section~\ref{sec:verification}) had not been inherited by the peer path; the fix adds the same post-rollback verification, and records peer outcomes to the same audit tables used for MTTR reporting rather than only a free-text timeline.
+
+\subsection{SLO-Aware, Two-Signal Verification}
+\label{sec:verification}
+Pod health alone is a false signal after a rollback lands on a revision with a latent fault: injected pods answer liveness/readiness probes with 200 regardless of whether they still serve the actual injected fault. Verification therefore requires two independent signals: Kubernetes pod/deployment health, and confirmation, via a live Prometheus query, that the alert which triggered the incident has itself stopped firing. A rollback landing on a still-faulty revision now fails verification and the executor walks further back through release history within the same incident, instead of reporting a false success.
+
+\subsection{Rollback Safety for the Healer's Own State}
+We distinguish two rollback-safety questions usually conflated. First: what happens to the \emph{healed} services' data on rollback? In this system the three business microservices hold no persistent store at all --- their repositories are in-memory, thread-safe maps --- so a Helm rollback cannot lose or corrupt their data, since a pod restart already discards it regardless of which revision is live. Second: what happens to the \emph{healer's own} persistent state --- a Postgres-backed audit trail --- if the healer's own Helm release is rolled back to a build older than a schema change that already ran? Before this work, the migration mechanism was an unconditional list of \texttt{CREATE TABLE IF NOT EXISTS} statements with no version tracking.
+
+We replaced this with a versioned, forward-only migration runner following an expand/contract discipline \cite{sadalage2006refactoring}: additive changes are never marked breaking; a migration that drops, renames, or otherwise changes a column or table in a way an older binary's explicit column-list queries cannot survive must be. A startup compatibility guard refuses to boot if the database carries a breaking migration whose version exceeds what the running binary understands --- the fingerprint of the healer's own release having been rolled back past a schema change its code no longer matches --- converting a silent data-corruption risk into a loud, actionable startup failure.
+
+\section{Methodology}
+
+\subsection{Fault Model and Alerts}
+\begin{table}[h]
+\centering
+\footnotesize
+\caption{Fault Injection Scenarios}
+\label{tab:scenarios}
+\begin{tabular}{@{}p{1.5cm}p{3.3cm}p{2.6cm}@{}}
+\toprule
+\textbf{Scenario} & \textbf{Injection} & \textbf{Detecting Alert (window)} \\
+\midrule
+S1 & \texttt{errorRate=0.5} on order-service & HighErrorRate (\texttt{for: 1m}) \\
+S2 & \texttt{latencyMs=3000} on inventory-service & HighLatency (\texttt{for: 2m}, 5m rate window) \\
+S3 & \texttt{errorRate=0.3} on payment-service (1\% SLO) & HighErrorRate (\texttt{for: 1m}) \\
+S5 & \texttt{errorRate=5.0} on order-service (fails config validation $\rightarrow$ CrashLoopBackOff) & StuckRollout (\texttt{for: 3m}) \\
+S6 (addon) & inventory-service + order-service (\texttt{errorRate=0.5}), co-deployed 1s apart & HighErrorRate + dependency coordinator \\
+\bottomrule
+\end{tabular}
+\end{table}
+S4 (combined error-rate and latency injection) was run once and excluded from Table~\ref{tab:results}: it was contaminated by residual cooldown state from oscillation testing that immediately preceded it (the decision engine correctly answered ``wait,'' but the scenario's own result was not independently interpretable). We report this exclusion rather than omit it silently.
+
+\subsection{MTTR Definition}
+MTTR is wall-clock time from the fault-injecting \texttt{helm upgrade} call ($t_0$) to the first instant both verification signals (Section~\ref{sec:verification}) hold simultaneously ($t_1$): pod/deployment health \emph{and} the triggering alert reporting resolved in Prometheus. This dual criterion is deliberately stricter than a single readiness bit, to avoid crediting recovery before the system is genuinely healthy against the metric actually violated.
+
+\subsection{Baselines and Experimental Protocol}
+\label{sec:protocol}
+The automated arm is the operator described in Sections~\ref{sec:design}--\ref{sec:verification}. The manual arm scales the operator to zero and plays a scripted human: it detects the incident at the first instant the scenario's alert reaches FIRING in Prometheus --- the same signal a dashboard-watching human would see, at the earliest possible instant --- then waits a reaction time drawn independently per repetition from $\mathrm{Uniform}(30\mathrm{s}, 60\mathrm{s})$ before executing \texttt{helm rollback} itself. Sampling from a distribution rather than using a single fixed constant is a deliberate improvement over a point-estimate human model, though grounding that distribution in empirical incident-response data (rather than an assumed range) remains future work (Section~\ref{sec:threats}). Every repetition, in both arms, is gated on Prometheus reporting zero currently-firing instances of the scenario's alert before injection, preventing a repetition from starting mid-resolution of the previous one.
+
+This protocol is fully implemented in \texttt{scripts/06-run-mttr-benchmark.sh}. \textbf{At the time of writing, it has not yet been run}: no live cluster was available during this development session. Table~\ref{tab:results} therefore reports only automated-arm data collected in earlier, separate live-cluster testing, before this harness existed. We state this directly rather than substitute an estimate, a simulation, or a number carried over from unrelated prior work for what the manual arm has not yet measured.
+
+\subsection{Statistical Analysis Plan}
+\texttt{scripts/analyze\_mttr.py} computes, per scenario: mean $\pm$ SD and median [IQR]; a bootstrap 95\% confidence interval on the mean ($B=10{,}000$ resamples); a Mann--Whitney U test between arms with a tie-corrected normal approximation; a Bonferroni-corrected significance threshold across the number of scenarios tested; and a rank-biserial effect size. The script was verified against synthetic data with a known, well-separated effect before being relied on for this paper, and prints an explicit caveat when fewer than ten repetitions per arm are available, rather than reporting a p-value without qualification. Running the full protocol (Section~\ref{sec:protocol}) at $n \geq 15$ reps/scenario/arm is the immediate next step; no result in this paper depends on that run having already happened.
+
+\section{Evaluation}
+
+\subsection{RQ1/RQ2/RQ3 --- Automated-Arm Pilot Data}
+\begin{table}[h]
+\centering
+\footnotesize
+\caption{Automated-Arm MTTR (Pilot, $n=1$ per scenario unless noted; manual arm not yet run --- see \S\ref{sec:protocol})}
+\label{tab:results}
+\begin{tabular}{@{}p{1.5cm}p{6.3cm}@{}}
+\toprule
+\textbf{Scenario} & \textbf{Result} \\
+\midrule
+S1 & 137\,s injection$\rightarrow$rollback (145\,s to verified-healthy); detection accounted for $\approx$132\,s, operator decide-and-execute $\approx$1\,s. \\
+S2 (pre-fix) & 196\,s to first rollback, then oscillation began within $\approx$90\,s (defects F1--F3, \S\ref{sec:defects}). \\
+S2 (post-fix) & 304\,s to a single stable rollback; an 8-minute stability watch showed no further rollbacks. The rise from 196\,s is the honest cost of the F2 fix: a service-wide aggregated alert must wait for the slowest pod, not the fastest. \\
+S3 & 139\,s; no oscillation (this alert already aggregates across pods). \\
+S5 & Zero user impact throughout (old ReplicaSet served under \texttt{maxUnavailable: 0}); 260\,s to automatic rollback once the stuck-rollout alert fired. \\
+S6 (addon) & Primary (order-service) rollback: 126\,s. Coordinator then rolled back inventory-service (deploy gap 299\,ms --- clearly co-released) and correctly left payment-service alone (deploy gap 3h7m). Full batch settled by 311\,s total wall-clock. \\
+\bottomrule
+\end{tabular}
+\end{table}
+These figures are consistent with the mechanism reported for single-service automated rollback: fast, level-triggered detection (S1, S3, S5) yields recovery dominated by the detection window itself, with operator decide-and-execute cost negligible by comparison. \textbf{We do not claim this answers RQ1--RQ3 with statistical confidence} --- that requires the manual arm and the replication described in Section~\ref{sec:protocol}, neither of which has run yet. What Table~\ref{tab:results} does support is the mechanistic pattern (RQ2/RQ3's ``why''), pending RQ1's magnitude claim. S6 directly demonstrates RQ4: a single alert on one service triggered a coordinated rollback of its entire release batch, and the peer that was not part of the batch was correctly left untouched.
+
+\subsection{RQ4 (addon) / Cross-Layer Defect Catalogue}
+\label{sec:defects}
+\begin{table}[h]
+\centering
+\footnotesize
+\caption{Defect Catalogue (F1--F12)}
+\label{tab:defects}
+\begin{tabular}{@{}p{0.5cm}p{5.6cm}p{1.0cm}@{}}
+\toprule
+\textbf{ID} & \textbf{Defect} & \textbf{Status} \\
+\midrule
+F1 & Rollback target selection could re-select the faulty revision it had just escaped & \fixed \\
+F2 & Per-pod (unaggregated) latency alert fired once per replica, spawning duplicate racing incidents & \fixed \\
+F3 & Cooldown checked non-atomically, bypassable by concurrent incidents & \fixed \\
+F4 & CrashLoopBackOff contained by \texttt{maxUnavailable: 0} produced no alert, never auto-rolled-back & \fixed \\
+F5 & Suppressed recovery has no internal retry; exposure bounded only by Alertmanager's re-notification cadence ($\leq$30 min) & \open \\
+F6 & Alert parser preferred a scrape target's own \texttt{service} label over the operator's contract label & \fixed \\
+F7 & Helm SDK release history returned in lexicographic, not numeric, order --- silently breaks target selection past 10 revisions & \fixed \\
+F8 & SLO verification's default Prometheus hostname did not match the deployed stack's service name & \fixed \\
+F9 & Batch-peer execution gate claimed before confirming a rollback target existed & \fixed \\
+F10 & Batch-peer rollback reported success without any post-rollback health check & \fixed \\
+F11 & Batch-peer outcomes recorded only to a free-text timeline, invisible to MTTR dashboards & \fixed \\
+F12 & Data race between the alert-handling and dispatched recovery-pipeline goroutines over one incident record; caught only under Go's race detector, retroactively explaining earlier ``flaky'' test observations & \fixed \\
+\bottomrule
+\end{tabular}
+\end{table}
+Seven of twelve defects (F1, F2, F3, F6, F7, F9, F12) share one underlying pattern: a decision made against state that looks current but is stale, ambiguously ordered, or concurrently mutated. None is inside any single component's documented behavior; each lives at a seam between two independently correct components, consistent with \cite{gunawi2014bugs} at the remediation-automation layer specifically.
+
+One further defect, found auditing target selection for this paper and reported here for the first time: F1's fix skips any candidate revision whose configuration equals the \emph{current} (faulty) revision's --- but only the current one. If a rollback target is itself later found faulty and the executor retries, it re-resolves the target from scratch; because the equality check compares only against the revision it is now leaving, not every revision already tried within the incident, the original faulty revision can pass the check again on a later attempt and be re-selected --- walking sideways back into the exact fault the incident began with, rather than genuinely further back through history.
+
+\section{Threats to Validity}
+\label{sec:threats}
+\textbf{Construct validity.} MTTR uses the dual pod-health-and-alert-cleared criterion of Section~\ref{sec:protocol}. Batch membership (``released together?'') is approximated by deploy-timestamp proximity within a configurable window rather than an explicit release identifier; Section~\ref{sec:discussion} treats this as an open item, not a settled definition. The manual-arm reaction-time distribution (Section~\ref{sec:protocol}) is assumed, not grounded in cited incident-response literature.
+
+\textbf{Internal validity.} S4 was excluded (Section~\ref{tab:scenarios}) due to cooldown-state contamination, reported rather than hidden. F12's discovery has a retrospective implication: some of this project's earlier ``environmentally flaky'' test observations, made before the race detector was run against the full concurrent suite, cannot now be distinguished with certainty from undiagnosed instances of that exact race.
+
+\textbf{External validity.} Evidence comes from a single minikube cluster running three deliberately simple, synthetically-instrumented microservices with fault injection via Helm value overrides. Absolute MTTR magnitudes will differ on managed clusters, larger topologies, and real traffic. The mechanistic claims depend only on a windowed-evaluation alerting layer and a persistent audit store, both standard in Prometheus/Postgres-based stacks, so we expect the qualitative findings to generalize even where specific timings do not.
+
+\textbf{Statistical-conclusion validity.} This is the paper's most significant limitation, stated plainly: \textbf{zero manual-arm repetitions exist at the time of writing}, and the automated-arm pilot data is $n=1$--2 per scenario. No claim in this paper rests on a statistical test; Table~\ref{tab:results} is offered as mechanism evidence only, and RQ1's magnitude question is explicitly left open pending the run described in Section~\ref{sec:protocol}.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+Several items are stated here as concrete future work rather than general caveats. \textbf{Run the benchmark.} Section~\ref{sec:protocol}'s harness and analysis tooling are complete and independently verified against synthetic data; executing it at $n \geq 15$ reps/scenario/arm against a live cluster is the single highest-priority next step and would convert this paper's Evaluation from a pilot to a supported result. \textbf{Ground the reaction-time distribution} in incident-response/MTTR literature rather than an assumed uniform range. \textbf{Batch-window membership} should move from timestamp proximity to an explicit, CI-stamped release identifier. \textbf{The dependency graph's trace store is in-memory only}; a pod restart discards every non-seed edge. \textbf{Batch-peer verification runs sequentially}, not in parallel, adding up to $n \times$ one verification timeout to an incident's total settle time for $n$ co-released peers, though this no longer affects the primary service's own measured MTTR. \textbf{The target-selection double-rollback edge case} (Section~\ref{sec:defects}) needs the equality check widened to every revision already attempted within the incident, not only the current one. \textbf{The suppressed-recovery exposure (F5)} needs either an internal reconcile loop or a shorter Alertmanager re-notification interval.
+
+\section{Conclusion}
+This paper set out to measure, honestly, whether automated rollback helps in a multi-service Kubernetes system, and found that doing so properly first required building the comparison itself: a two-arm, statistically-analyzable benchmark harness did not previously exist for this system, so we built one, verified its analysis logic, and report exactly how much of it has actually been run --- the automated arm only, at pilot scale. We resist the temptation to let a complete-looking Evaluation section imply a comparison that has not happened yet. What we can support is the mechanism (detection dominates recovery time for level-triggered faults) and the addon contribution this multi-service setting specifically required: rollback that follows a co-released batch rather than stopping at the one service that happened to alert, verified with the same two-signal discipline at every layer it is applied, backed by a healer that now treats its own persistent state with the same rollback-safety rigor as the systems it protects. The twelfth defect in this catalogue was found auditing the mechanism meant to prevent the first three, which is itself the paper's implicit thesis: this kind of system does not stop needing adversarial testing once it works.
+
+\section*{Artifact Availability}
+The operator, dependency-graph scanner, batch-rollback coordinator, migration system, benchmark harness, and statistical-analysis script are available at \url{https://github.com/rohithsandiri/Summer_Project}. The project is under active development; results in this paper correspond to the repository state at the time of writing.
+
+\begin{thebibliography}{20}
+
+\bibitem{kephart2003vision} J. O. Kephart and D. M. Chess, ``The Vision of Autonomic Computing,'' \emph{IEEE Computer}, vol. 36, no. 1, pp. 41--50, 2003.
+
+\bibitem{ibm2006blueprint} IBM, ``An Architectural Blueprint for Autonomic Computing,'' IBM White Paper, 4th ed., 2006.
+
+\bibitem{psaier2011survey} H. Psaier and S. Dustdar, ``A Survey on Self-Healing Systems: Approaches and Systems,'' \emph{Computing}, vol. 91, no. 1, pp. 43--73, 2011.
+
+\bibitem{burns2016borg} B. Burns, B. Grant, D. Oppenheimer, E. Brewer, and J. Wilkes, ``Borg, Omega, and Kubernetes,'' \emph{Communications of the ACM}, vol. 59, no. 5, pp. 50--57, 2016.
+
+\bibitem{beyer2016sre} B. Beyer, C. Jones, J. Petoff, and N. R. Murphy, Eds., \emph{Site Reliability Engineering: How Google Runs Production Systems}. Sebastopol, CA: O'Reilly, 2016.
+
+\bibitem{basiri2016chaos} A. Basiri, N. Behnam, R. de Rooij, L. Hochstein, L. Kosewski, J. Reynolds, and C. Rosenthal, ``Chaos Engineering,'' \emph{IEEE Software}, vol. 33, no. 3, pp. 35--41, 2016.
+
+\bibitem{forsgren2018accelerate} N. Forsgren, J. Humble, and G. Kim, \emph{Accelerate: The Science of Lean Software and DevOps}. Portland, OR: IT Revolution, 2018.
+
+\bibitem{brazil2018prometheus} B. Brazil, \emph{Prometheus: Up \& Running}. Sebastopol, CA: O'Reilly, 2018.
+
+\bibitem{dobies2020operators} J. Dobies and J. Wood, \emph{Kubernetes Operators}. Sebastopol, CA: O'Reilly, 2020.
+
+\bibitem{dragoni2017microservices} N. Dragoni, S. Giallorenzo, A. L. Lafuente, M. Mazzara, F. Montesi, R. Mustafin, and L. Safina, ``Microservices: Yesterday, Today, and Tomorrow,'' in \emph{Present and Ulterior Software Engineering}. Springer, 2017, pp. 195--216.
+
+\bibitem{newman2021microservices} S. Newman, \emph{Building Microservices}, 2nd ed. Sebastopol, CA: O'Reilly, 2021.
+
+\bibitem{sridharan2018observability} C. Sridharan, \emph{Distributed Systems Observability}. Sebastopol, CA: O'Reilly, 2018.
+
+\bibitem{humble2010continuous} J. Humble and D. Farley, \emph{Continuous Delivery: Reliable Software Releases through Build, Test, and Deployment Automation}. Addison-Wesley, 2010.
+
+\bibitem{gunawi2014bugs} H. S. Gunawi et al., ``What Bugs Live in the Cloud? A Study of 3000+ Issues in Cloud Systems,'' in \emph{Proc. ACM Symposium on Cloud Computing (SoCC)}, 2014, pp. 1--14.
+
+\bibitem{lin2018microscope} J. Lin, P. Chen, and Z. Zheng, ``Microscope: Pinpoint Performance Issues with Causal Graphs in Micro-service Environments,'' in \emph{Proc. 16th Int. Conf. on Service-Oriented Computing (ICSOC)}, Hangzhou, China, 2018, pp. 3--20.
+
+\bibitem{liu2021microhecl} D. Liu, C. He, X. Peng, F. F. Lin, C. Zhang, S. Gong, Z. Li, J. Ou, and Z. Wu, ``MicroHECL: High-Efficient Root Cause Localization in Large-Scale Microservice Systems,'' in \emph{Proc. IEEE/ACM 43rd Int. Conf. on Software Engineering: Software Engineering in Practice (ICSE-SEIP)}, 2021, pp. 338--347.
+
+\bibitem{cilium2024hubble} Cilium Authors, ``Hubble Service Map,'' Cilium Project Documentation. [Online]. Available: \url{https://cilium.io/use-cases/service-map/}
+
+\bibitem{sarda2024llm} K. Sarda, Z. Namrud, M. Litoiu, L. Shwartz, and I. Watts, ``Leveraging Large Language Models for the Auto-remediation of Microservice Applications: An Experimental Study,'' in \emph{Companion Proc. 32nd ACM Int. Conf. on the Foundations of Software Engineering (FSE '24)}, Porto de Galinhas, Brazil, 2024.
+
+\bibitem{sadalage2006refactoring} P. Sadalage and M. Fowler, \emph{Refactoring Databases: Evolutionary Database Design}. Addison-Wesley, 2006.
+
+\bibitem{helm2024docs} Helm Authors, ``Helm: The Package Manager for Kubernetes.'' [Online]. Available: \url{https://helm.sh}
+
+\end{thebibliography}
+
+\end{document}
