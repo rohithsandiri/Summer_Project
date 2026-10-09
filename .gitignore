@@ -1,2 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
 
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code internals
 .claude/worktrees/
+
+# Environment / secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Build artifacts
+bin/
+dist/
+
+# Helm
+charts/*.tgz
